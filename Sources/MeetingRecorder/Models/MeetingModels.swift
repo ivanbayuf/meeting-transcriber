@@ -69,6 +69,8 @@ enum MeetingStatus: String, Codable, CaseIterable {
     case saving = "Saving"
     case completed = "Completed"
     case failed = "Failed"
+    /// Notes are ready and waiting for the user to Upload or Discard.
+    case ready = "Ready"
     case retrying = "Retrying"
 }
 

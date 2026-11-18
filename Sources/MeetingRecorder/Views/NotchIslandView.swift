@@ -349,7 +349,7 @@ struct NotchIslandView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// What the card body shows. (Not "Body" — that name is View's associated type.)
-    enum Pane: Hashable { case outputs, history, processing, success, failure }
+    enum Pane: Hashable { case outputs, history, processing, review, success, failure }
 
     /// One-by-one content reveal: when the card expands, elements flip from
     /// hidden to visible with a 0.05s step (staggeredReveal); on collapse they
@@ -371,6 +371,7 @@ struct NotchIslandView: View {
     /// Priority: an active pipeline or a blocker outranks whatever page the user was on.
     private var currentPane: Pane {
         if manager.isProcessing { return .processing }
+        if manager.pendingReview != nil { return .review }
         if manager.errorMessage != nil { return .failure }
         if model.flash != nil { return .success }
         return model.page == .history ? .history : .outputs
@@ -378,7 +379,7 @@ struct NotchIslandView: View {
 
     /// States that hold the card open regardless of hover.
     private func isPinned(_ pane: Pane) -> Bool {
-        pane == .processing || pane == .failure || pane == .success
+        pane == .processing || pane == .review || pane == .failure || pane == .success
     }
 
     var body: some View {
@@ -511,6 +512,8 @@ struct NotchIslandView: View {
         switch content {
         case .outputs, .history: return IslandMetrics.maxBodyHeight
         case .processing: return 40
+        // 4 top + 24 headline + 16 title + 16 details + 10 + 26 buttons + 12 bottom.
+        case .review: return 108
         // Items 29 + 42: 12pt bottom inset with space for the card contents.
         case .failure: return 116
         case .success: return successHeight(model.flash)
@@ -550,7 +553,7 @@ struct NotchIslandView: View {
                     chevron(open: open, content: content)
                         .modifier(ElementHoverScale(
                             isHovering: $chevronHovering,
-                            enabled: !(content == .processing || content == .failure),
+                            enabled: !(content == .processing || content == .review || content == .failure),
                             cornerRadius: metrics.controlCornerRadius
                         ))
                         .transition(.opacity)
@@ -621,7 +624,7 @@ struct NotchIslandView: View {
         }
         .buttonStyle(PressScaleStyle())
         // Can't fold away a running pipeline or an unacknowledged blocker.
-        .disabled(content == .processing || content == .failure)
+        .disabled(content == .processing || content == .review || content == .failure)
         .help(open ? "Collapse" : "Expand")
         .accessibilityLabel(open ? "Collapse" : "Expand")
     }
@@ -634,6 +637,7 @@ struct NotchIslandView: View {
         case .outputs: outputsPage
         case .history: historyPage
         case .processing: processingPage
+        case .review: reviewPage
         case .success: successPage(model.flash)
         case .failure: failurePage
         }
@@ -810,6 +814,58 @@ struct NotchIslandView: View {
         .padding(.top, 2)
         .padding(.bottom, 12)
         .frame(width: metrics.expandedWidth, height: IslandMetrics.maxBodyHeight, alignment: .top)
+    }
+
+    /// After summarising: the user decides. Discard asks for confirmation first.
+    private var reviewPage: some View {
+        let meeting = manager.pendingReview
+        let summary = meeting?.summary
+        let details = [
+            summary?.keyPoints.flatMap { $0.isEmpty ? nil : "\($0.count) key points" },
+            summary.flatMap { $0.actionPoints.isEmpty ? nil : "\($0.actionPoints.count) action items" },
+            summary.flatMap { $0.keyDecisions.isEmpty ? nil : "\($0.keyDecisions.count) decisions" },
+        ].compactMap { $0 }.joined(separator: " · ")
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color.green)
+                Text("Notes ready")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.white)
+            }
+            .frame(height: 24)
+            Group {
+                Text(meeting?.title ?? "")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.white.opacity(0.75))
+                Text(details.isEmpty ? "Summary ready" : details)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.white.opacity(0.45))
+            }
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.leading, 22) // under the headline text, past the checkmark
+            .frame(height: 16, alignment: .leading)
+
+            Spacer(minLength: 10)
+            HStack(spacing: 8) {
+                Button("Discard") {
+                    model.holdOpen { manager.confirmDiscardPendingNotes() }
+                }
+                .buttonStyle(PillButtonStyle())
+                Spacer(minLength: 0)
+                Button(manager.uploadActionTitle) {
+                    Task { await manager.uploadPendingNotes() }
+                }
+                .buttonStyle(PillButtonStyle(prominent: true))
+            }
+        }
+        .padding(.horizontal, IslandMetrics.horizontalPadding)
+        .padding(.top, 4)
+        .padding(.bottom, 12)
+        .frame(width: metrics.expandedWidth, height: 108, alignment: .topLeading)
     }
 
     private var processingPage: some View {

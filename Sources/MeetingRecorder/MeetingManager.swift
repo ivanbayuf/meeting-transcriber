@@ -477,26 +477,15 @@ final class MeetingManager: ObservableObject {
                 if let title = summary.title { meeting.title = title }
             }
 
-            meeting.status = .saving
-            processingStage = "Saving…"
-            let report = await deliverOutputs(meeting: meeting, summary: summary)
-
-            if !report.nothingEnabled && !report.savedSomewhere {
-                // The selected destination failed: surface it and allow Retry.
-                meeting.status = .failed
-                errorMessage = report.failures.joined(separator: "\n")
-            } else {
-                meeting.status = .completed
-                lastReport = report
+            // Notion / Google Docs / Markdown wait for the user's OK (Upload or Discard);
+            // the clipboard is harmless and ephemeral, so it is filled straight away.
+            if let destination = activeDestination, destination != .clipboard {
+                meeting.status = .ready
+                pendingReview = meeting
+                saveHistory()
+                return
             }
-
-            // Delete the WAV only once the notes are durably stored somewhere
-            // (clipboard alone doesn't count — it's ephemeral).
-            let durablySaved = report.notionURL != nil || report.markdownURL != nil || report.googleDocURL != nil
-            if autoDeleteAudio, durablySaved, let audioURL = meeting.audioURL {
-                try? FileManager.default.removeItem(at: audioURL)
-                meeting.audioURL = nil
-            }
+            await saveNotes(meeting, summary: summary)
         } catch {
             logger.error("Processing failed at \(self.processingStage, privacy: .public): \(error.localizedDescription, privacy: .public) [\(String(describing: error), privacy: .public)]")
             errorMessage = "Processing failed: \(error.localizedDescription)"
@@ -504,6 +493,78 @@ final class MeetingManager: ObservableObject {
         }
 
         saveHistory()
+    }
+
+    // MARK: - Review (Upload / Discard)
+
+    /// Notes waiting for the user's decision; the island shows Discard / Upload.
+    @Published private(set) var pendingReview: Meeting?
+
+    /// Label for the Upload button, named after the destination.
+    var uploadActionTitle: String {
+        switch activeDestination {
+        case .notion: return "Upload to Notion"
+        case .googleDocs: return "Upload to Google Docs"
+        case .markdown: return "Save Markdown file"
+        case .clipboard: return "Copy to clipboard"
+        case nil: return "Keep in History"
+        }
+    }
+
+    func uploadPendingNotes() async {
+        guard let meeting = pendingReview, let summary = meeting.summary, !isProcessing else { return }
+        pendingReview = nil
+        isProcessing = true
+        defer { isProcessing = false; processingStage = "" }
+        await saveNotes(meeting, summary: summary)
+        saveHistory()
+    }
+
+    /// Asks first — discarding deletes the recording, transcript and notes for good.
+    func confirmDiscardPendingNotes() {
+        guard let meeting = pendingReview else { return }
+        let alert = NSAlert()
+        alert.messageText = "Discard this meeting?"
+        alert.informativeText = "The recording, transcript and notes for “\(meeting.title)” will be deleted. This can’t be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "No") // first = default (Return), so a stray Return keeps the meeting
+        alert.addButton(withTitle: "Yes, discard").hasDestructiveAction = true
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        pendingReview = nil
+        meetingHistory.removeAll { $0.id == meeting.id }
+        if currentMeeting?.id == meeting.id { currentMeeting = nil }
+        saveHistory()
+        // The recording and any leftover 10-minute chunk files share the meeting ID.
+        let files = (try? FileManager.default.contentsOfDirectory(at: tempDirectory, includingPropertiesForKeys: nil)) ?? []
+        for file in files where file.lastPathComponent.hasPrefix(meeting.id.uuidString) {
+            try? FileManager.default.removeItem(at: file)
+        }
+        logger.info("Meeting discarded by the user")
+    }
+
+    /// Writes the notes to the selected destination and records the outcome.
+    private func saveNotes(_ meeting: Meeting, summary: MeetingSummary) async {
+        meeting.status = .saving
+        processingStage = activeDestination.map { "Saving to \($0.title)…" } ?? "Saving…"
+        let report = await deliverOutputs(meeting: meeting, summary: summary)
+
+        if !report.nothingEnabled && !report.savedSomewhere {
+            // The selected destination failed: surface it and allow Retry.
+            meeting.status = .failed
+            errorMessage = report.failures.joined(separator: "\n")
+        } else {
+            meeting.status = .completed
+            lastReport = report
+        }
+
+        // Delete the WAV only once the notes are durably stored somewhere
+        // (clipboard alone doesn't count — it's ephemeral).
+        let durablySaved = report.notionURL != nil || report.markdownURL != nil || report.googleDocURL != nil
+        if autoDeleteAudio, durablySaved, let audioURL = meeting.audioURL {
+            try? FileManager.default.removeItem(at: audioURL)
+            meeting.audioURL = nil
+        }
     }
 
     /// Writes the notes to the ONE selected destination and records the outcome
@@ -612,6 +673,11 @@ final class MeetingManager: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "meetingHistory"),
            let history = try? JSONDecoder().decode([Meeting].self, from: data) {
             meetingHistory = history
+            // Notes left waiting for Upload/Discard when the app quit: ask again.
+            if let waiting = history.first, waiting.status == .ready, waiting.summary != nil {
+                pendingReview = waiting
+                currentMeeting = waiting
+            }
         }
     }
 
