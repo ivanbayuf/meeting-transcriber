@@ -23,11 +23,11 @@ enum MenuBarIcon {
     nonisolated static func make() -> NSImage {
         let size = NSSize(width: pointSize, height: pointSize)
         let image = NSImage(size: size, flipped: true) { _ in
-            // item 31: shift the glyph up ~1pt optically. The canvas is flipped
+            // items 31 + 36: shift the glyph up ~1.85pt optically. The canvas is flipped
             // (y-down = y-up on screen), so a downward SVG-space translation
             // moves the drawn result upward on screen.
-            // 1pt screen ÷ (18/32) scale ≈ 1.78 SVG units → round to 1.8.
-            var shiftDown = AffineTransform(translationByX: 0, byY: 1.8)
+            // Total 3.3 SVG units (about 1.85pt on screen).
+            var shiftDown = AffineTransform(translationByX: 0, byY: 3.3)
             let scale = AffineTransform(scale: pointSize / 32)
 
             let stroke = strokedPath()

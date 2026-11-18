@@ -18,7 +18,7 @@ struct IslandMetrics: Equatable {
     /// the morph spring's small overshoot aren't clipped by the panel edge.
     static let shadowInset: CGFloat = 32
     /// Tallest body below the top row (outputs/history pages).
-    static let maxBodyHeight: CGFloat = 172
+    static let maxBodyHeight: CGFloat = 184
     /// Expanded card width. Widened to 330 (item 27) so the "Send notes" section
     /// has room. Still clears "Window"/"Help" menus on a 14" display. Tune here.
     static let baseExpandedWidth: CGFloat = 330
@@ -134,8 +134,6 @@ enum IslandMotion {
     static let reducedFade = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.15)
     /// The only continuous animation in the app — record button pulse.
     static let pulse = Animation.easeInOut(duration: 0.8).repeatForever(autoreverses: true)
-    /// Hover fill fade: ~0.15s ease-out (item 25, transform/opacity only).
-    static let hoverFill = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.15)
     /// Blinking dot: ~1s steady cadence with autoreversal (item 24).
     static let blink = Animation.easeInOut(duration: 0.5).repeatForever(autoreverses: true)
 }
@@ -157,31 +155,22 @@ struct ClampedHeight: ViewModifier, Animatable {
     }
 }
 
-// MARK: - Per-element hover fill (item 34)
-
-/// Reusable hover-fill modifier used by the mic/record control, the chevron,
-/// and the collapsed-clock button. Renders an inset rounded-rect fill at
-/// 10% white opacity, fading in/out ~0.15s ease-out. Transform/opacity only
-/// (compositor-friendly). Harmless on non-hover-capable pointers.
-///
-/// Usage:
-///   someView.modifier(ElementHoverFill(isHovering: $hovering))
-struct ElementHoverFill: ViewModifier {
+/// Pointer affordance for the black island, using a compositor transform.
+/// `enabled: false` (disabled target) suppresses the scale so a dead control
+/// doesn't advertise itself. Hover is reset on disappear: a view removed from
+/// under the pointer never receives onHover(false), which would otherwise
+/// leave it stuck at 1.06 the next time it appears.
+struct ElementHoverScale: ViewModifier {
     @Binding var isHovering: Bool
-    var cornerRadius: CGFloat = 10
-    var inset: CGFloat = 2
+    var enabled: Bool = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         content
-            .background(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.white.opacity(isHovering ? 0.10 : 0))
-                    .padding(inset)
-                    .allowsHitTesting(false)
-                    .animation(reduceMotion ? nil : IslandMotion.hoverFill, value: isHovering)
-            )
+            .scaleEffect(isHovering && enabled && !reduceMotion ? 1.06 : 1)
+            .animation(reduceMotion ? nil : .spring(duration: 0.25, bounce: 0.3), value: isHovering)
             .onHover { isHovering = $0 }
+            .onDisappear { isHovering = false }
     }
 }
 
@@ -321,10 +310,10 @@ struct NotchIslandView: View {
     enum Pane: Hashable { case outputs, history, processing, success, failure, permission }
 
     /// One-by-one content reveal: when the card expands, elements flip from
-    /// hidden to visible with a 0.1s step (staggeredReveal); on collapse they
+    /// hidden to visible with a 0.05s step (staggeredReveal); on collapse they
     /// all exit fast without stagger.
     @State private var reveal = false
-    // item 34: per-element hover state (replaces pill-wide pillHovering — item 32 removed)
+    // Hover state drives target scale and recording waveform/stop swap.
     @State private var recordHovering = false
     @State private var chevronHovering = false
     @State private var clockHovering = false
@@ -446,7 +435,7 @@ struct NotchIslandView: View {
     }
 
     /// One-by-one reveal (Ivan's 2026-11-18 request): on expand, each element
-    /// fades + slides up 6pt IN ORDER with a 0.1s step. On collapse everything
+    /// fades + slides up 6pt IN ORDER with a 0.05s step. On collapse everything
     /// exits fast without stagger. Reduce Motion: opacity only, no slide.
     private struct StaggerReveal: ViewModifier {
         var index: Int
@@ -459,7 +448,7 @@ struct NotchIslandView: View {
                 .offset(y: active || reduceMotion ? 0 : 6)
                 .animation(
                     reduceMotion ? .easeOut(duration: 0.1)
-                    : .easeOut(duration: 0.18).delay(active ? 0.05 + Double(index) * 0.1 : 0),
+                    : .easeOut(duration: 0.18).delay(active ? 0.05 + Double(index) * 0.05 : 0),
                     value: active
                 )
         }
@@ -469,7 +458,7 @@ struct NotchIslandView: View {
         switch content {
         case .outputs, .history: return IslandMetrics.maxBodyHeight
         case .processing: return 64
-        // item 29: increased from 108 → 116 to give buttons 14pt bottom breathing room
+        // Items 29 + 42: 12pt bottom inset with space for the card contents.
         case .failure, .permission: return 116
         case .success: return successHeight(model.flash)
         }
@@ -491,26 +480,26 @@ struct NotchIslandView: View {
     /// recording, the live timer + blinking dot) on the right wing. On a notched
     /// screen the camera housing sits in the Spacer between the wings.
     ///
-    /// Item 34: each interactive element gets its OWN inset rounded-rect hover fill
-    /// via ElementHoverFill (10% white, cornerRadius 10, inset 2pt, ~0.15s ease-out).
-    /// All three targets — record control, chevron, collapsed-clock — share the modifier.
+    /// Each interactive target scales on hover; island-level continuous hover
+    /// still controls collapse grace.
     private func topRow(open: Bool, content: Pane, recording: Bool) -> some View {
         HStack(spacing: 0) {
-            // item 34: per-element hover fill on the record control
             recordControl(open: open)
-                .modifier(ElementHoverFill(isHovering: $recordHovering))
+                .modifier(ElementHoverScale(isHovering: $recordHovering,
+                                            enabled: !manager.isProcessing && groqKeyValid))
             Spacer(minLength: 0)
             ZStack(alignment: .trailing) {
                 if recording && !open {
                     // Collapsed + recording: blinking dot + timer (items 22, 24)
-                    // item 34: per-element hover fill on the collapsed clock button
                     collapsedClock
-                        .modifier(ElementHoverFill(isHovering: $clockHovering))
+                        .modifier(ElementHoverScale(isHovering: $clockHovering))
                         .transition(.opacity)
                 } else {
-                    // item 34: per-element hover fill on the chevron button
                     chevron(open: open, content: content)
-                        .modifier(ElementHoverFill(isHovering: $chevronHovering))
+                        .modifier(ElementHoverScale(
+                            isHovering: $chevronHovering,
+                            enabled: !(content == .processing || content == .failure || content == .permission)
+                        ))
                         .transition(.opacity)
                 }
             }
@@ -524,8 +513,8 @@ struct NotchIslandView: View {
         RecordControlButton(
             isRecording: manager.isRecording,
             isProcessing: manager.isProcessing,
-            isOpen: open,
             groqKeyValid: groqKeyValid,
+            isHovered: recordHovering,
             action: { toggleRecording() }
         )
     }
@@ -644,7 +633,7 @@ struct NotchIslandView: View {
         // item 27: 4 outer + 8 row inset = 12pt text inset, matching the top row.
         .padding(.horizontal, 4)
         .padding(.top, 4)
-        .padding(.bottom, 10)
+        .padding(.bottom, 12)
         .frame(width: metrics.expandedWidth, height: IslandMetrics.maxBodyHeight, alignment: .top)
     }
 
@@ -662,10 +651,10 @@ struct NotchIslandView: View {
         switch destination {
         case .notion:
             guard !manager.notionConfigured else { return nil }
-            return DestinationRow.Accessory(title: "Connect Notion…") { model.onOpenSettings(.notion) }
+            return DestinationRow.Accessory(title: "Connect Notion") { model.onOpenSettings(.notion) }
         case .markdown:
             // item 33: "Change…" → "Directory" (no ellipsis in copy once configured)
-            return DestinationRow.Accessory(title: manager.markdownConfigured ? "Directory" : "Choose folder…") {
+            return DestinationRow.Accessory(title: manager.markdownConfigured ? "Directory" : "Choose directory") {
                 chooseMarkdownFolder()
             }
         case .clipboard:
@@ -688,8 +677,7 @@ struct NotchIslandView: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(Color.white.opacity(0.6))
                     }
-                    .padding(.leading, 6)
-                    .padding(.trailing, 12)
+                    .padding(.horizontal, 8)
                     .frame(height: 30)
                     .background(Capsule().fill(Color.red.opacity(0.22)))
                     .contentShape(Capsule())
@@ -756,7 +744,7 @@ struct NotchIslandView: View {
         }
         .padding(.horizontal, 4)
         .padding(.top, 2)
-        .padding(.bottom, 10)
+        .padding(.bottom, 12)
         .frame(width: metrics.expandedWidth, height: IslandMetrics.maxBodyHeight, alignment: .top)
     }
 
@@ -865,11 +853,12 @@ struct NotchIslandView: View {
         // item 29: 14pt bottom padding — matches the left/right 12-15pt rhythm
         .padding(.horizontal, 15)
         .padding(.top, 6)
-        .padding(.bottom, 14)
+        .padding(.bottom, 12)
         .frame(width: metrics.expandedWidth, height: 116, alignment: .topLeading)
     }
 
-    /// Shown instead of re-prompting: the user grants access in System Settings.
+    /// The user grants access in System Settings; "Try again" re-fires the
+    /// system request via manager.requestScreenCaptureAccess().
     private var permissionPage: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 8) {
@@ -889,7 +878,24 @@ struct NotchIslandView: View {
                 }
             }
             HStack(spacing: 8) {
-                Spacer()
+                // Item 39: tertiary text action on the leading edge — three pills
+                // won't fit in the 306pt row. Re-fires the system request; on
+                // grant permissionNeeded clears and the pane swaps out. Press
+                // feedback is PressScaleStyle (transform/opacity only).
+                Button {
+                    manager.requestScreenCaptureAccess()
+                } label: {
+                    Text("Try again")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.7))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .frame(height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressScaleStyle())
+                .help("Request Screen & System Audio access again")
+                Spacer(minLength: 0)
                 Button("Not now") {
                     manager.dismissPermissionCard()
                     model.collapseNow()
@@ -905,7 +911,7 @@ struct NotchIslandView: View {
         // crowd the bottom edge.
         .padding(.horizontal, IslandMetrics.horizontalPadding)
         .padding(.top, 6)
-        .padding(.bottom, 14)
+        .padding(.bottom, 12)
         .frame(width: metrics.expandedWidth, height: 116, alignment: .topLeading)
     }
 
@@ -1013,14 +1019,15 @@ struct GroqOnboardingCard: View {
 
 /// The record/stop control in the top-left wing.
 /// Item 19: NO red circle background. Glyph is RED while recording, WHITE while idle.
-/// Item 25/34: Hover fill is applied by ElementHoverFill in the parent topRow.
+/// Item 38: the parent topRow applies the scale hover affordance.
 /// Item 13: Disabled (greyed) when groqKeyValid is false.
 struct RecordControlButton: View {
     var isRecording: Bool
     var isProcessing: Bool
-    var isOpen: Bool
     var groqKeyValid: Bool
+    var isHovered: Bool
     var action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button(action: action) {
@@ -1029,9 +1036,22 @@ struct RecordControlButton: View {
                     ProgressView()
                         .controlSize(.mini)
                 } else {
-                    // item 19: no circle, glyph color carries the state
-                    RecordFace(kind: isRecording ? .stop : .mic,
-                               pulses: isRecording && !isOpen)
+                    // item 19: no circle, glyph color carries the state.
+                    if isRecording {
+                        ZStack {
+                            RecordingWaveform(active: !isHovered)
+                                .opacity(isHovered ? 0 : 1)
+                                .scaleEffect(isHovered ? 0.72 : 1)
+                            RoundedRectangle(cornerRadius: 1.8, style: .continuous)
+                                .fill(Color.red)
+                                .frame(width: 9, height: 9)
+                                .opacity(isHovered ? 1 : 0)
+                                .scaleEffect(isHovered ? 1 : 0.72)
+                        }
+                        .animation(reduceMotion ? nil : .spring(duration: 0.2, bounce: 0.3), value: isHovered)
+                    } else {
+                        RecordFace(kind: .mic, pulses: false)
+                    }
                 }
             }
             .frame(width: 24, height: 24)
@@ -1042,6 +1062,33 @@ struct RecordControlButton: View {
         .disabled(isProcessing || !groqKeyValid)
         .help(isRecording ? "Stop recording" : (groqKeyValid ? "Start recording" : "Add a Groq API key to record"))
         .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
+    }
+}
+
+/// Five red rounded bars pulse with staggered phases. TimelineView owns the
+/// clock and pauses entirely when inactive or Reduce Motion is enabled.
+struct RecordingWaveform: View {
+    var active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private let heights: [CGFloat] = [0.42, 0.72, 1.0, 0.72, 0.42]
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active || reduceMotion)) { context in
+            let elapsed = context.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .center, spacing: 2) {
+                ForEach(0..<5, id: \.self) { index in
+                    let phase = reduceMotion ? 0 : (elapsed * 2 * .pi / 1.2 - Double(index) * 0.15 * 2 * .pi / 1.2)
+                    let pulse: CGFloat = reduceMotion ? 0.72 : CGFloat(0.55 + 0.45 * ((sin(phase) + 1) / 2))
+                    Capsule()
+                        .fill(Color.red)
+                        .frame(width: 2.5, height: 15)
+                        .scaleEffect(y: pulse * heights[index], anchor: .center)
+                }
+            }
+            .frame(width: 21, height: 20)
+        }
+        .accessibilityHidden(true)
     }
 }
 

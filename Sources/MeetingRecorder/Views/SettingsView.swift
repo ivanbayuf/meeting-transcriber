@@ -211,10 +211,16 @@ private struct SettingsDestinationRow: View {
             Button("Disconnect", role: .destructive) { manager.disconnectNotion() }
                 .controlSize(.small)
         case .notion where !isReady:
-            Button("Connect Notion…") { showingNotionConnect = true }
+            Button { showingNotionConnect = true } label: {
+                Text("Connect Notion")
+                    .fixedSize(horizontal: true, vertical: false)
+            }
                 .controlSize(.small)
         case .markdown:
-            Button(isReady ? "Change…" : "Choose folder…") { manager.chooseMarkdownFolder() }
+            Button { manager.chooseMarkdownFolder() } label: {
+                Text(isReady ? "Directory" : "Choose directory")
+                    .fixedSize(horizontal: true, vertical: false)
+            }
                 .controlSize(.small)
         default:
             EmptyView()

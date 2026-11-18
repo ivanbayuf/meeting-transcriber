@@ -233,6 +233,23 @@ final class MeetingManager: ObservableObject {
 
     func dismissPermissionCard() { permissionNeeded = false }
 
+    /// Item 39: explicit retry entry point, called by the island permission
+    /// card's "Try again" button (NotchIslandView.permissionPage). Requests
+    /// exactly once and, on grant, clears `permissionNeeded` so the record
+    /// button becomes usable.
+    func requestScreenCaptureAccess() {
+        // One request per explicit retry. If already granted, just clear state.
+        if CGPreflightScreenCaptureAccess() {
+            permissionNeeded = false
+            return
+        }
+        // Fires CGRequestScreenCaptureAccess exactly once. The system prompt
+        // (or System Settings row) is logged on return whether granted or not.
+        // Usually false (the prompt is async); the user must record again after
+        // enabling in System Settings. Honour a true return so the card clears.
+        permissionNeeded = !CGRequestScreenCaptureAccess()
+    }
+
     func openScreenCapturePrivacySettings() {
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
         NSWorkspace.shared.open(url)
@@ -276,6 +293,10 @@ final class MeetingManager: ObservableObject {
         migrateLegacyOutputs()
         // No SCShareableContent fetch here: it waits for the first Record press,
         // so launching never pops the Screen Recording prompt.
+        //
+        // Item 39: DO NOT call CGPreflightScreenCaptureAccess()/CGRequestScreenCaptureAccess()
+        // from init. (Preflight is cheap and side-effect-free, but the request path
+        // is only entered from startRecording/requestScreenCaptureAccess, never here.)
 
         // Auto-verify a pre-loaded Groq key at launch so the island's record
         // gate opens without a manual "Save & Verify" (item 13). Debug override:
@@ -324,6 +345,15 @@ final class MeetingManager: ObservableObject {
         lastReport = nil
         permissionNeeded = false
         micPermissionNeeded = false
+        // Item 39: entering startRecording is a fresh Record press. A stale
+        // pendingDisplay from a prior attempt (which may have been captured
+        // before a tccutil reset) must not bypass the request branch below.
+        pendingDisplay = nil
+        // NOTE: Mic permission (AVAudioApplication.requestRecordPermission) is
+        // requested inside AudioRecorder.startRecordingSystemAudio/startRecording,
+        // i.e. AFTER displayForRecording returns. The mic request is therefore
+        // sequenced after, not before, the screen-capture request — it cannot
+        // block or short-circuit CGRequestScreenCaptureAccess.
 
         let meeting = Meeting(title: recordMode == .system ? "System Audio Meeting" : (selectedWindow?.title ?? "Meeting"))
         currentMeeting = meeting
@@ -333,6 +363,9 @@ final class MeetingManager: ObservableObject {
         // System audio needs the display list — fetched only now, on Record.
         var display: SCDisplay?
         if recordMode == .system {
+            // Item 39: unconditionally enter displayForRecording so the
+            // CGRequestScreenCaptureAccess branch runs on every Record press
+            // when permission is not granted. DO NOT gate this on preflight here.
             display = await displayForRecording()
             guard display != nil else {
                 // DEBUG override: `defaults write com.ivanbayu.meetingrecorder
@@ -384,16 +417,34 @@ final class MeetingManager: ObservableObject {
     /// missing. Re-request only on a Record press so a reset TCC grant is
     /// logged again and the user can enable the app in System Settings.
     private func displayForRecording() async -> SCDisplay? {
-        if let pendingDisplay { return pendingDisplay }
+        // Item 39: cache the displays ONLY after a successful grant. A cached
+        // SCDisplay is meaningless without permission and must not short-circuit
+        // the request branch on a later press (e.g. after tccutil reset).
+        if let pendingDisplay, CGPreflightScreenCaptureAccess() {
+            return pendingDisplay
+        }
         if !CGPreflightScreenCaptureAccess() {
-            guard CGRequestScreenCaptureAccess() else { return nil }
+            // Request once per Record press. On denial (or TCC reset), still
+            // attempt the fetch — SCDisplay fetch will surface the exact error,
+            // and the system will have logged this request against the app.
+            _ = CGRequestScreenCaptureAccess()
         }
         do {
-            pendingDisplay = try await fetchSCContentBox().displays.first
+            let box = try await fetchSCContentBox()
+            guard let display = box.displays.first else {
+                logger.info("No displays returned by SCShareableContent after permission check")
+                pendingDisplay = nil
+                return nil
+            }
+            pendingDisplay = display
+            return display
         } catch {
+            // This is the definitive "not granted" signal — do not cache, so the
+            // next Record press re-enters CGRequestScreenCaptureAccess.
             logger.info("Screen capture permission not granted: \(error)")
+            pendingDisplay = nil
+            return nil
         }
-        return pendingDisplay
     }
 
     func stopRecording() async {
@@ -573,12 +624,20 @@ final class MeetingManager: ObservableObject {
     func dismissFailure() {
         errorMessage = nil
         if currentMeeting?.status == .failed { currentMeeting = nil }
+        // Item 39: a dismissed failure must not leave a stale pendingDisplay
+        // around that could short-circuit the next Record press's permission
+        // request. Clearing here (in addition to the guard in displayForRecording)
+        // is belt-and-braces.
+        pendingDisplay = nil
     }
 
     // MARK: - Window/Process Selection
 
     /// Window-mode source list. Never called at launch — only on explicit user
     /// action — so it can't trigger the Screen Recording prompt by itself.
+    /// Item 39: this path deliberately does NOT call CGRequestScreenCaptureAccess.
+    /// The permission prompt is only fired from startRecording/requestScreenCaptureAccess,
+    /// so opening the source picker never causes prompt spam.
     func refreshAvailableSources() async {
         do {
             let box = try await fetchSCContentBox()
