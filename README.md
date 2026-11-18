@@ -21,6 +21,16 @@ Download `MeetingTranscriber.dmg` from Releases, drag the app to Applications,
 and follow **READ ME FIRST** inside the disk image (also in
 [`DMG-README.txt`](DMG-README.txt)): first open, permissions, Groq key, Notion.
 
+## Limits
+
+With a **free Groq API key** you can process about **8 hours of meetings per day**
+(Groq's free plan allows ~8 hours of transcription a day). Meeting length doesn't
+matter — a 3-hour workshop works as well as several short calls — only the daily
+total does. The limit resets on a rolling 24 hours.
+
+Need more? Upgrade your key to Groq's paid Developer plan (roughly $0.04 per hour
+of audio, plus a few cents per summary); the app needs no change.
+
 ## Build from source
 
 Requires macOS 14.2+ and Xcode 15+ command-line tools.
