@@ -1,17 +1,9 @@
 import Foundation
 import AVFoundation
-import ScreenCaptureKit
-import CoreVideo
 import os.log
 
-// Sendable box for ScreenCaptureKit types (not Sendable, but only used from MainActor)
-struct SCWindowBox: @unchecked Sendable {
-    let process: SCRunningApplication?
-    let window: SCWindow?
-}
-
 // MARK: - Audio Recorder Service
-/// Records meeting audio: system audio from selected window (ScreenCaptureKit) + microphone
+/// Records meeting audio: everything the Mac plays (Core Audio tap) + the microphone
 final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     private let logger = Logger(subsystem: "MeetingRecorder", category: "AudioRecorder")
 
@@ -27,9 +19,6 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     private var audioFile: AVAudioFile?
     private var micEngine: AVAudioEngine?
     private var micMixer: AVAudioMixerNode?
-    private var systemAudioStream: SCStream?
-    private var systemAudioOutput: SystemAudioOutput?
-    private var systemVideoOutput: SystemVideoOutput?
     private var systemAudioTap: SystemAudioTap?
     private var recordingStartTime: Date?
     private var timer: Timer?
@@ -106,42 +95,6 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         frameLock.lock()
         framesWritten += count
         frameLock.unlock()
-    }
-
-    func startRecording(box: SCWindowBox, outputURL: URL) async throws {
-        guard !isRecording else { throw AudioRecorderError.alreadyRecording }
-        let window = box.window
-
-        self.outputURL = outputURL
-        recordingStartTime = Date()
-        currentDuration = 0
-        resetFrameCounter()
-
-        // Create output file (16kHz mono WAV for Groq)
-        guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true) else {
-            throw AudioRecorderError.fileCreationFailed
-        }
-        audioFile = try AVAudioFile(forWriting: outputURL, settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: true)
-
-        // Start microphone
-        try await startMicrophoneCapture()
-
-        // Start system audio if window provided
-        if let window = window {
-            try await startSystemAudioCapture(window: window)
-        }
-
-        isRecording = true
-
-        // Duration timer
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self = self, let start = self.recordingStartTime else { return }
-            DispatchQueue.main.async {
-                self.currentDuration = Date().timeIntervalSince(start)
-            }
-        }
-
-        logger.info("Recording started")
     }
 
     func stopRecording() async -> URL? {
@@ -264,7 +217,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    // MARK: - System Audio (ScreenCaptureKit)
+    // MARK: - System Audio
 
     /// Whole-system audio (every app) via a Core Audio process tap + the mic.
     func startRecordingSystemAudio(outputURL: URL) async throws {
@@ -302,49 +255,9 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         logger.info("System audio recording started (process tap, all apps)")
     }
 
-    private func startSystemAudioCapture(window: SCWindow) async throws {
-        let configuration = SCStreamConfiguration()
-        configuration.capturesAudio = true
-        configuration.excludesCurrentProcessAudio = true
-        configuration.sampleRate = 16000
-        configuration.channelCount = 1
-        // SCK audio-only quirk: audio buffers only flow once a video pipeline
-        // exists. Set a pixel format and register a no-op video output below.
-        configuration.pixelFormat = kCVPixelFormatType_32BGRA
-        configuration.width = 2
-        configuration.height = 2
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-
-        let filter = SCContentFilter(desktopIndependentWindow: window)
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-
-        let output = SystemAudioOutput()
-        output.onBuffer = { [weak self] buffer in
-            self?.writeBuffer(buffer, from: .system)
-        }
-
-        try stream.addStreamOutput(output, type: SCStreamOutputType.audio, sampleHandlerQueue: DispatchQueue(label: "system-audio-queue"))
-
-        // No-op video output — required for audio to flow in audio-only mode.
-        let videoOutput = SystemVideoOutput()
-        try stream.addStreamOutput(videoOutput, type: SCStreamOutputType.screen, sampleHandlerQueue: DispatchQueue(label: "system-video-queue"))
-
-        try await stream.startCapture()
-        systemAudioStream = stream
-        systemAudioOutput = output
-        systemVideoOutput = videoOutput
-        logger.info("System audio capture started")
-    }
-
     private func stopSystemAudioCapture() async {
         systemAudioTap?.stop()
         systemAudioTap = nil
-        if let stream = systemAudioStream {
-            do { try await stream.stopCapture() } catch { logger.error("Stop capture error: \(error)") }
-            systemAudioStream = nil
-            systemAudioOutput = nil
-            systemVideoOutput = nil
-        }
     }
 
     // MARK: - Buffer Writing (converts to 16kHz int16)
@@ -509,60 +422,15 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     }
 }
 
-// MARK: - System Audio Output Handler
-class SystemAudioOutput: NSObject, SCStreamOutput {
-    var onBuffer: ((AVAudioPCMBuffer) -> Void)?
-
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .audio, sampleBuffer.isValid else { return }
-
-        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-        let audioFormat = AVAudioFormat(cmAudioFormatDescription: formatDescription)
-
-        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
-        guard frameCount > 0,
-              let pcmBuffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: frameCount) else { return }
-        pcmBuffer.frameLength = frameCount
-
-        var blockBuffer: CMBlockBuffer?
-        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: nil,
-            bufferListOut: pcmBuffer.mutableAudioBufferList,
-            bufferListSize: MemoryLayout<AudioBufferList>.size,
-            blockBufferAllocator: kCFAllocatorDefault,
-            blockBufferMemoryAllocator: kCFAllocatorDefault,
-            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-            blockBufferOut: &blockBuffer
-        )
-
-        guard status == noErr else { return }
-        onBuffer?(pcmBuffer)
-    }
-}
-
-// MARK: - System Video Output Handler (no-op)
-/// Discards video frames. Its only purpose is to keep a video pipeline alive
-/// so ScreenCaptureKit delivers audio buffers in audio-only mode.
-class SystemVideoOutput: NSObject, SCStreamOutput {
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        // Intentionally empty — video frames are discarded.
-    }
-}
-
 // MARK: - Errors
 enum AudioRecorderError: LocalizedError {
     case alreadyRecording
-    case noTargetProcess
-    case permissionDenied
     case micPermissionDenied
     case fileCreationFailed
 
     var errorDescription: String? {
         switch self {
         case .alreadyRecording: return "Already recording"
-        case .noTargetProcess: return "No meeting window selected"
-        case .permissionDenied: return "Screen recording permission denied"
         case .micPermissionDenied: return "Microphone permission denied"
         case .fileCreationFailed: return "Failed to create audio file"
         }

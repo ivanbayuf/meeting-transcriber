@@ -2,7 +2,6 @@ import Foundation
 import SwiftUI
 import AppKit
 import CoreGraphics
-import ScreenCaptureKit
 import os.log
 
 @MainActor
@@ -54,7 +53,6 @@ final class MeetingManager: ObservableObject {
     @Published private(set) var googleConnecting = false
     @AppStorage("autoDeleteAudio") var autoDeleteAudio: Bool = true
     @AppStorage("selectedLanguage") var selectedLanguageRaw: String = "auto"
-    @AppStorage("recordMode") var recordModeRaw: String = "system"
 
     // MARK: Output — ONE destination (radio). Replaces outputNotion/Markdown/Clipboard.
 
@@ -278,10 +276,6 @@ final class MeetingManager: ObservableObject {
     /// Result of the most recent successful pipeline run.
     @Published private(set) var lastReport: OutputReport?
     @Published var meetingHistory: [Meeting] = []
-    @Published var availableWindows: [SCWindow] = []
-    @Published var availableProcesses: [SCRunningApplication] = []
-    @Published var selectedProcess: SCRunningApplication?
-    @Published var selectedWindow: SCWindow?
     @Published var errorMessage: String?
     @Published var isProcessing = false
     @Published var processingStage: String = ""
@@ -307,12 +301,6 @@ final class MeetingManager: ObservableObject {
 
         loadHistory()
         migrateLegacyOutputs()
-        // No SCShareableContent fetch here: it waits for the first Record press,
-        // so launching never pops the Screen Recording prompt.
-        //
-        // Item 39: DO NOT call CGPreflightScreenCaptureAccess()/CGRequestScreenCaptureAccess()
-        // from init. (Preflight is cheap and side-effect-free, but the request path
-        // is only entered from startRecording/requestScreenCaptureAccess, never here.)
 
         // Auto-verify a pre-loaded Groq key at launch so the island's record
         // gate opens without a manual "Save & Verify" (item 13). Debug override:
@@ -348,11 +336,6 @@ final class MeetingManager: ObservableObject {
 
     // MARK: - Recording Control
 
-    var recordMode: RecordMode {
-        get { RecordMode(rawValue: recordModeRaw) ?? .system }
-        set { recordModeRaw = newValue.rawValue }
-    }
-
     /// Background work for the recording in progress (nil after it's been used).
     private var livePipeline: LivePipeline?
 
@@ -364,7 +347,7 @@ final class MeetingManager: ObservableObject {
         // System mode uses a Core Audio process tap: no Screen Recording permission,
         // no display. macOS asks for "System Audio Recording" (and Microphone) itself.
 
-        let meeting = Meeting(title: recordMode == .system ? "System Audio Meeting" : (selectedWindow?.title ?? "Meeting"))
+        let meeting = Meeting(title: "System Audio Meeting") // replaced by the AI title after summarising
         currentMeeting = meeting
         meetingHistory.insert(meeting, at: 0)
         saveHistory()
@@ -380,16 +363,7 @@ final class MeetingManager: ObservableObject {
 
         do {
             meeting.status = .recording
-            if recordMode == .system {
-                try await audioRecorder.startRecordingSystemAudio(outputURL: audioURL)
-            } else {
-                guard let process = selectedProcess, let window = selectedWindow else {
-                    errorMessage = "Please select a meeting window first"
-                    meeting.status = .failed
-                    return
-                }
-                try await audioRecorder.startRecording(box: SCWindowBox(process: process, window: window), outputURL: audioURL)
-            }
+            try await audioRecorder.startRecordingSystemAudio(outputURL: audioURL)
             meeting.audioURL = audioURL
             recordingStartedAt = Date()
             isRecording = true
@@ -626,31 +600,6 @@ final class MeetingManager: ObservableObject {
 
     // MARK: - Window/Process Selection
 
-    /// Window-mode source list. Never called at launch — only on explicit user
-    /// action — so it can't trigger the Screen Recording prompt by itself.
-    /// Item 39: this path deliberately does NOT call CGRequestScreenCaptureAccess.
-    /// The permission prompt is only fired from startRecording/requestScreenCaptureAccess,
-    /// so opening the source picker never causes prompt spam.
-    func refreshAvailableSources() async {
-        do {
-            let box = try await fetchSCContentBox()
-            availableWindows = box.windows.filter { !($0.title ?? "").isEmpty }
-            availableProcesses = box.apps.filter { $0.bundleIdentifier != Bundle.main.bundleIdentifier } // exclude ourselves by ID, not display name
-        } catch {
-            logger.error("Failed to get shareable content: \(error)")
-        }
-    }
-
-    func selectProcessByID(_ processID: Int32) {
-        selectedProcess = availableProcesses.first { $0.processID == processID }
-        selectedWindow = availableWindows.first { $0.owningApplication?.processID == processID }
-    }
-
-    func selectWindowByID(_ windowID: CGWindowID) {
-        selectedWindow = availableWindows.first { $0.windowID == windowID }
-        selectedProcess = availableProcesses.first { $0.processID == selectedWindow?.owningApplication?.processID }
-    }
-
     // MARK: - History Persistence
 
     func saveHistory() {
@@ -714,14 +663,3 @@ enum SettingsSection: String, Hashable, Sendable {
     case outputs
 }
 
-enum RecordMode: String, CaseIterable, Identifiable {
-    case system = "all"
-    case window = "window"
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .system: return "All system sound (easy)"
-        case .window: return "Specific app window (cleaner)"
-        }
-    }
-}

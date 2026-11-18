@@ -1,23 +1,7 @@
 import SwiftUI
 import AppKit
-import ScreenCaptureKit
 import AVFoundation
 import os.log
-
-// Nonisolated helper: ScreenCaptureKit values are not Sendable; box them.
-struct SCContentBox: @unchecked Sendable {
-    let windows: [SCWindow]
-    let apps: [SCRunningApplication]
-    let displays: [SCDisplay]
-}
-
-func fetchSCContentBox() async throws -> SCContentBox {
-    let content = try await SCShareableContent.current
-    let windows = content.windows.filter { $0.owningApplication != nil }
-    let apps = content.applications
-    let displays = content.displays
-    return SCContentBox(windows: windows, apps: apps, displays: displays)
-}
 
 @main
 struct MeetingRecorderApp: App {
