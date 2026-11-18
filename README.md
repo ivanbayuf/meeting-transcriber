@@ -1,19 +1,44 @@
 # Meeting Transcriber
 
-A macOS menu-bar app that lives in the notch. Press record, have your meeting,
-press stop — it transcribes the audio with Groq (Whisper), writes a summary with
-decisions, action items and open questions, and saves it to Notion, Google Docs,
-a Markdown folder, or your clipboard.
+**The simplest meeting notes app for macOS.** Press record in the notch, have your
+meeting, and get clean minutes in Notion, Google Docs, Markdown or your clipboard.
+One free Groq key, nothing to download, no setup beyond that.
 
-- Records system audio (Meet / Teams / Zoom) **and** your microphone — needs only
-  the "System Audio Recording" and Microphone permissions, not Screen Recording
-- Meeting minutes in one format everywhere: purpose, key points, decisions,
-  action items (checkboxes), open questions & risks
-- Works on long meetings: each 10 minutes is transcribed and summarised in the
-  background while you record, so notes are ready seconds after you stop
-- Mixed languages are fine (e.g. English + Indonesian + Japanese)
-- AI-written meeting title, so Notion pages aren't all called "Meeting"
-- Bring your own free Groq API key; audio goes only to Groq, notes only where you choose
+<p align="center">
+  <img src="docs/preview/journey.svg" width="720" alt="Meeting Transcriber: pick where notes go and press record in the notch; it records the call and your mic, summarises long meetings in the background, lets you upload or discard, and saves clean meeting minutes to Notion.">
+</p>
+
+## Why it's different
+
+- **Lives in the notch.** A black island under your menu bar: tap the mic to record,
+  watch the waveform move with the conversation, hover it to stop.
+- **Notes go where you already work.** Notion, Google Docs, a Markdown folder or the
+  clipboard — pick once. Google and Notion connect with a sign-in, no exporting.
+- **Minutes, not a transcript dump.** Every meeting becomes the same tidy page:
+  Purpose · Key points · Decisions · Action items (checkboxes) · Open questions & risks,
+  with an AI-written title so your pages aren't all called "Meeting".
+- **You decide what gets saved.** When the notes are ready, choose **Upload** or
+  **Discard** — discarding deletes the recording, transcript and notes for good.
+- **Long meetings just work.** Every 10 minutes is transcribed and summarised in the
+  background while you talk, so even a 2-hour meeting is ready seconds after you stop.
+- **Records the whole call.** System audio (Meet, Teams, Zoom, Bluetooth headsets)
+  plus your mic — no Screen Recording permission needed.
+- **Light and free to run.** No 1 GB model to download; runs on any Apple-silicon Mac
+  with macOS 14.2+. A free Groq key covers about 8 hours of meetings a day.
+- **Mixed languages are fine** — English, Indonesian, Japanese and mixes.
+
+## The journey
+
+<p align="center">
+  <img src="docs/preview/steps.png" width="880" alt="Six steps: 1 pick where notes go and press record, 2 it records the call and your mic, 3 long meetings are summarised as you talk, 4 Notes ready with Discard or Upload to Notion, 5 Saved to Notion, 6 clean meeting minutes with key points and action-item checkboxes.">
+</p>
+
+1. **Pick where notes go, then press record** — the island under your notch.
+2. **It records the call and your mic** — the waveform follows the voices.
+3. **Long meetings are summarised as you talk** — 10 minutes at a time, in the background.
+4. **Notes ready** — check the title and what's in it, then Upload or Discard.
+5. **Saved** — one click opens the page.
+6. **Clean minutes** — purpose, key points, decisions, action items you can tick off.
 
 ## Install
 
