@@ -1,0 +1,209 @@
+import SwiftUI
+import AppKit
+
+/// Hosted in SettingsWindowController's NSWindow (not a SwiftUI Settings scene).
+struct SettingsView: View {
+    static let width: CGFloat = 460
+    static let height: CGFloat = 600
+
+    @EnvironmentObject var manager: MeetingManager
+    @State private var testGroqSuccess: Bool?
+    @State private var showingTestAlert = false
+    @State private var testAlertMessage = ""
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            form
+                .onAppear { scroll(proxy, to: manager.settingsFocus) }
+                .onChange(of: manager.settingsFocus) { _, section in scroll(proxy, to: section) }
+        }
+        .frame(width: Self.width, height: Self.height)
+        .alert("Connection Test", isPresented: $showingTestAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(testAlertMessage)
+        }
+    }
+
+    private var form: some View {
+        Form {
+            Section("Groq API (separate account for this app)") {
+                SecureField("API Key", text: $manager.groqAPIKey)
+
+                Picker("Transcription Model", selection: $manager.transcriptionModel) {
+                    ForEach(AppSettings.availableTranscriptionModels, id: \.self) { model in
+                        Text(model).tag(model)
+                    }
+                }
+
+                Picker("Summary Model", selection: $manager.summaryModel) {
+                    ForEach(AppSettings.availableSummaryModels, id: \.self) { model in
+                        Text(model).tag(model)
+                    }
+                }
+
+                Picker("Fallback Summary Model", selection: $manager.fallbackSummaryModel) {
+                    ForEach(AppSettings.availableSummaryModels, id: \.self) { model in
+                        Text(model).tag(model)
+                    }
+                }
+
+                HStack {
+                    Button("Test Groq Connection") {
+                        Task { await testGroq() }
+                    }
+                    .disabled(manager.groqAPIKey.isEmpty)
+
+                    if let success = testGroqSuccess {
+                        Image(systemName: success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundStyle(success ? Color.green : Color.red)
+                    }
+                }
+            }
+
+            Section("Notion") {
+                NotionConnectView()
+            }
+            .id(SettingsSection.notion)
+
+            Section {
+                ForEach(OutputDestination.allCases) { destination in
+                    SettingsDestinationRow(destination: destination)
+                }
+            } header: {
+                Text("Send notes to")
+            } footer: {
+                Text("Notes go to one place: summary, decisions, action points, open questions, topics and the full transcript.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .id(SettingsSection.outputs)
+
+            Section("Island") {
+                Toggle("Show island on launch", isOn: $manager.autoShowIsland)
+            }
+
+            Section("Recording") {
+                Toggle("Auto-delete audio once notes are saved", isOn: $manager.autoDeleteAudio)
+                    .help("Deletes the recording after Notion or the Markdown file succeeds. Clipboard alone doesn't count.")
+
+                Picker("Transcription Language", selection: $manager.selectedLanguageRaw) {
+                    ForEach(TranscriptionLanguage.allCases, id: \.self) { lang in
+                        Text(lang.displayName).tag(lang.rawValue)
+                    }
+                }
+            }
+
+            Section("Advanced") {
+                Button("Clear Meeting History", role: .destructive) {
+                    manager.meetingHistory.removeAll()
+                    manager.saveHistory()
+                }
+            }
+
+            Section("About") {
+                HStack {
+                    Text("Version")
+                    Spacer()
+                    Text("1.0.0")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// Deep link from the island ("Connect Notion…"). Deferred a beat so the
+    /// Form has laid out its rows before scrolling; then the focus is consumed.
+    private func scroll(_ proxy: ScrollViewProxy, to section: SettingsSection?) {
+        guard let section else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(60))
+            withAnimation(.timingCurve(0.23, 1, 0.32, 1, duration: 0.25)) {
+                proxy.scrollTo(section, anchor: .top)
+            }
+            manager.settingsFocus = nil
+        }
+    }
+
+    private func testGroq() async {
+        do {
+            let url = URL(string: "https://api.groq.com/openai/v1/models")!
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(manager.groqAPIKey)", forHTTPHeaderField: "Authorization")
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let success = (response as? HTTPURLResponse)?.statusCode == 200
+            testGroqSuccess = success
+            testAlertMessage = success ? "Groq connection successful!" : "Groq test failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)). Check API key."
+        } catch {
+            testGroqSuccess = false
+            testAlertMessage = "Groq test failed: \(error.localizedDescription)"
+        }
+        showingTestAlert = true
+    }
+}
+
+/// One radio row in Settings → "Send notes to". Setup first: a destination
+/// that isn't set up shows its setup action instead of being selectable.
+private struct SettingsDestinationRow: View {
+    @EnvironmentObject var manager: MeetingManager
+    let destination: OutputDestination
+
+    private var isReady: Bool { manager.isReady(destination) }
+    private var isSelected: Bool { manager.activeDestination == destination }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button { manager.select(destination) } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                        .font(.system(size: 14))
+                    Image(systemName: destination.systemImage)
+                        .frame(width: 18)
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(destination.title)
+                        if let caption {
+                            Text(caption)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!isReady)
+            .opacity(isReady ? 1 : 0.5)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+
+            trailingAction
+        }
+    }
+
+    private var caption: String? {
+        switch destination {
+        case .notion: return isReady ? "Meetings database" : nil
+        case .markdown: return isReady ? "Folder: \(manager.markdownFolderName)" : nil
+        case .clipboard: return nil
+        }
+    }
+
+    @ViewBuilder
+    private var trailingAction: some View {
+        switch destination {
+        case .notion where !isReady:
+            Button("Connect Notion…") { manager.settingsFocus = .notion }
+                .controlSize(.small)
+        case .markdown:
+            Button(isReady ? "Change…" : "Choose folder…") { manager.chooseMarkdownFolder() }
+                .controlSize(.small)
+        default:
+            EmptyView()
+        }
+    }
+}

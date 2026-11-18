@@ -1,0 +1,571 @@
+import Foundation
+import SwiftUI
+import AppKit
+import ScreenCaptureKit
+import os.log
+
+@MainActor
+final class MeetingManager: ObservableObject {
+    private let logger = Logger(subsystem: "MeetingRecorder", category: "MeetingManager")
+
+    // Shared instance so the island and the Settings window use ONE copy of the data.
+    @MainActor static let shared = MeetingManager()
+
+    let audioRecorder = AudioRecorder()
+    let groqClient = GroqClient()
+    let notionClient = NotionClient()
+
+    @AppStorage("groqAPIKey") var groqAPIKey: String = "" {
+        didSet { groqClient.apiKey = groqAPIKey }
+    }
+    @AppStorage("transcriptionModel") var transcriptionModel: String = "whisper-large-v3-turbo" {
+        didSet { groqClient.transcriptionModel = transcriptionModel }
+    }
+    @AppStorage("summaryModel") var summaryModel: String = "openai/gpt-oss-120b" {
+        didSet { groqClient.summaryModel = summaryModel }
+    }
+    @AppStorage("fallbackSummaryModel") var fallbackSummaryModel: String = "llama-3.3-70b-versatile" {
+        didSet { groqClient.fallbackSummaryModel = fallbackSummaryModel }
+    }
+    // willSet → objectWillChange: @AppStorage inside an ObservableObject does not
+    // publish on its own, and the island/Settings gate the Notion row on these.
+    @AppStorage("notionToken") var notionToken: String = "" {
+        willSet { objectWillChange.send() }
+        didSet { notionClient.apiToken = notionToken }
+    }
+    @AppStorage("notionDatabaseID") var notionDatabaseID: String = "" {
+        willSet { objectWillChange.send() }
+        didSet { notionClient.databaseID = notionDatabaseID }
+    }
+    @AppStorage("autoDeleteAudio") var autoDeleteAudio: Bool = true
+    @AppStorage("selectedLanguage") var selectedLanguageRaw: String = "auto"
+    @AppStorage("recordMode") var recordModeRaw: String = "system"
+
+    // MARK: Output — ONE destination (radio). Replaces outputNotion/Markdown/Clipboard.
+
+    @AppStorage("outputDestination") var outputDestinationRaw: String = OutputDestination.clipboard.rawValue {
+        willSet { objectWillChange.send() }
+    }
+    /// Absolute path picked with "Choose folder…"; empty = not chosen yet.
+    /// (Older builds may have stored a `~/…` path — `folderURL` expands it.)
+    @AppStorage("markdownFolder") var markdownFolder: String = "" {
+        willSet { objectWillChange.send() }
+    }
+    @AppStorage("autoShowIsland") var autoShowIsland: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+    /// Set once the ScreenCaptureKit prompt has been triggered. After that, a
+    /// missing grant shows the in-app card instead of calling SCK again.
+    @AppStorage("screenCapturePrompted") private var screenCapturePrompted: Bool = false
+
+    var notionConfigured: Bool {
+        !notionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !notionDatabaseID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var markdownConfigured: Bool {
+        !markdownFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var outputDestination: OutputDestination {
+        get { OutputDestination(rawValue: outputDestinationRaw) ?? .clipboard }
+        set { outputDestinationRaw = newValue.rawValue }
+    }
+
+    /// Setup gate: a destination becomes selectable only once it is set up.
+    func isReady(_ destination: OutputDestination) -> Bool {
+        switch destination {
+        case .notion: return notionConfigured
+        case .markdown: return markdownConfigured
+        case .clipboard: return true
+        }
+    }
+
+    /// The destination the pipeline will actually write to; nil when the
+    /// selected one has lost its setup (e.g. Notion was disconnected).
+    var activeDestination: OutputDestination? {
+        let selected = outputDestination
+        return isReady(selected) ? selected : nil
+    }
+
+    /// Radio rows call this; ignored for destinations that aren't set up.
+    func select(_ destination: OutputDestination) {
+        guard isReady(destination) else { return }
+        outputDestination = destination
+    }
+
+    /// Last path component of the Markdown folder, for compact captions.
+    var markdownFolderName: String {
+        MarkdownExporter.folderURL(from: markdownFolder).lastPathComponent
+    }
+
+    /// Folder picker; on success stores the absolute path and selects Markdown.
+    func chooseMarkdownFolder() {
+        guard let path = FolderPicker.choose(startingAt: markdownFolder) else { return }
+        markdownFolder = path
+        outputDestination = .markdown
+    }
+
+    // MARK: Notion connect — one secret → verify → find-or-create project + database
+
+    enum NotionConnectState: Equatable {
+        case idle
+        case connecting
+        case failed(String)
+    }
+    @Published private(set) var notionConnectState: NotionConnectState = .idle
+
+    func connectNotion(secret: String) async {
+        let token = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty, notionConnectState != .connecting else { return }
+        notionConnectState = .connecting
+        notionToken = token          // remembered even if setup fails
+        notionDatabaseID = ""
+        do {
+            let databaseID = try await notionClient.connectAndSetup()
+            notionDatabaseID = databaseID
+            notionConnectState = .idle
+            outputDestination = .notion
+        } catch {
+            logger.error("Notion connect failed: \(error)")
+            notionConnectState = .failed(Self.connectMessage(for: error))
+        }
+    }
+
+    func disconnectNotion() {
+        notionDatabaseID = ""
+        notionToken = ""
+        notionConnectState = .idle
+        if outputDestination == .notion { outputDestination = .clipboard }
+    }
+
+    private static func connectMessage(for error: any Error) -> String {
+        if let notionError = error as? NotionError {
+            switch notionError {
+            case .unauthorized:
+                return "Notion didn’t accept that secret. Copy the whole Internal Integration Secret and try again."
+            case .apiError(let code, _) where code == 400 || code == 403 || code == 404:
+                return "The secret works, but the integration has no access. In Notion open a page → ⋯ → Connections → add your integration, then try again."
+            default:
+                break
+            }
+        }
+        if let urlError = error as? URLError {
+            return "Couldn’t reach Notion (\(urlError.localizedDescription)). Check your connection and try again."
+        }
+        return "Setup failed: \(error.localizedDescription)"
+    }
+
+    // MARK: Settings routing
+
+    /// Section the Settings window scrolls to next time it shows.
+    @Published var settingsFocus: SettingsSection?
+
+    // MARK: Screen & System Audio permission
+
+    /// True when Record needed ScreenCaptureKit and it wasn't granted. Drives
+    /// the island's permission card; never re-triggers the system prompt.
+    @Published private(set) var permissionNeeded = false
+
+    func dismissPermissionCard() { permissionNeeded = false }
+
+    func openScreenCapturePrivacySettings() {
+        let paneURLs = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "x-apple.system-settings:com.apple.settings.PrivacySecurity",
+        ]
+        for string in paneURLs {
+            if let url = URL(string: string), NSWorkspace.shared.open(url) { return }
+        }
+    }
+
+    @Published var currentMeeting: Meeting?
+    /// True between a successful capture start and stop. Published (unlike
+    /// `Meeting.status`) so views redraw the moment recording begins/ends.
+    @Published private(set) var isRecording = false
+    /// Wall-clock start of the active recording; drives the island timer.
+    @Published private(set) var recordingStartedAt: Date?
+    /// Result of the most recent successful pipeline run.
+    @Published private(set) var lastReport: OutputReport?
+    @Published var meetingHistory: [Meeting] = []
+    @Published var availableWindows: [SCWindow] = []
+    @Published var availableProcesses: [SCRunningApplication] = []
+    @Published var selectedProcess: SCRunningApplication?
+    @Published var selectedWindow: SCWindow?
+    @Published var errorMessage: String?
+    @Published var isProcessing = false
+    @Published var processingStage: String = ""
+
+    private let tempDirectory: URL
+
+    init() {
+        tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("MeetingRecorder", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+
+        groqClient.apiKey = groqAPIKey
+        groqClient.transcriptionModel = transcriptionModel
+        groqClient.summaryModel = summaryModel
+        groqClient.fallbackSummaryModel = fallbackSummaryModel
+        notionClient.apiToken = notionToken
+        notionClient.databaseID = notionDatabaseID
+
+        loadHistory()
+        migrateLegacyOutputs()
+        // No SCShareableContent fetch here: it waits for the first Record press,
+        // so launching never pops the Screen Recording prompt.
+    }
+
+    /// One-time move from the three output bools to `outputDestination`.
+    private func migrateLegacyOutputs() {
+        let defaults = UserDefaults.standard
+        let legacyKeys = ["outputNotion", "outputMarkdown", "outputClipboard"]
+        guard defaults.object(forKey: "outputDestination") == nil,
+              legacyKeys.contains(where: { defaults.object(forKey: $0) != nil }) else { return }
+        // Old defaults were: Notion on, Markdown on, Clipboard off.
+        func flag(_ key: String, _ fallback: Bool) -> Bool {
+            defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key)
+        }
+        if flag("outputNotion", true) && notionConfigured {
+            outputDestination = .notion
+        } else if flag("outputMarkdown", true) && markdownConfigured {
+            outputDestination = .markdown
+        } else {
+            outputDestination = .clipboard
+        }
+        legacyKeys.forEach { defaults.removeObject(forKey: $0) }
+    }
+
+    // MARK: - Recording Control
+
+    var recordMode: RecordMode {
+        get { RecordMode(rawValue: recordModeRaw) ?? .system }
+        set { recordModeRaw = newValue.rawValue }
+    }
+
+    private var pendingDisplay: SCDisplay?
+
+    func startRecording() async {
+        guard !isRecording, !isProcessing else { return }
+        errorMessage = nil
+        lastReport = nil
+        permissionNeeded = false
+
+        // System audio needs the display list — fetched only now, on Record.
+        var display: SCDisplay?
+        if recordMode == .system {
+            display = await displayForRecording()
+            guard display != nil else {
+                permissionNeeded = true
+                return
+            }
+        }
+
+        let meeting = Meeting(title: recordMode == .system ? "System Audio Meeting" : (selectedWindow?.title ?? "Meeting"))
+        currentMeeting = meeting
+        meetingHistory.insert(meeting, at: 0)
+        saveHistory()
+
+        let audioURL = tempDirectory.appendingPathComponent("\(meeting.id.uuidString).wav")
+
+        do {
+            meeting.status = .recording
+            if let display {
+                // Whole-display system audio: no window selection needed
+                try await audioRecorder.startRecordingSystemAudio(display: SCDisplayBox(display: display), outputURL: audioURL)
+            } else {
+                guard let process = selectedProcess, let window = selectedWindow else {
+                    errorMessage = "Please select a meeting window first"
+                    meeting.status = .failed
+                    return
+                }
+                try await audioRecorder.startRecording(box: SCWindowBox(process: process, window: window), outputURL: audioURL)
+            }
+            meeting.audioURL = audioURL
+            recordingStartedAt = Date()
+            isRecording = true
+        } catch {
+            errorMessage = "Failed to start recording: \(error.localizedDescription)"
+            meeting.status = .failed
+        }
+    }
+
+    /// The display to capture, or nil when Screen & System Audio permission is
+    /// missing. ScreenCaptureKit is called at most once in an ungranted state:
+    /// the first press may show the system prompt; after that a failed
+    /// (non-prompting) preflight goes straight to the in-app card.
+    private func displayForRecording() async -> SCDisplay? {
+        if let pendingDisplay { return pendingDisplay }
+        if screenCapturePrompted && !CGPreflightScreenCaptureAccess() {
+            return nil
+        }
+        screenCapturePrompted = true
+        do {
+            pendingDisplay = try await fetchSCContentBox().displays.first
+        } catch {
+            logger.info("Screen capture permission not granted: \(error)")
+        }
+        return pendingDisplay
+    }
+
+    func stopRecording() async {
+        guard isRecording, let meeting = currentMeeting else { return }
+
+        isRecording = false
+        recordingStartedAt = nil
+        meeting.endDate = Date()
+
+        let audioURL = await audioRecorder.stopRecording()
+
+        guard let audioURL = audioURL else {
+            errorMessage = "No audio recorded"
+            meeting.status = .failed
+            saveHistory()
+            return
+        }
+
+        meeting.audioURL = audioURL
+        await processMeeting(meeting)
+    }
+
+    // MARK: - Processing Pipeline
+
+    private enum PipelineError: LocalizedError {
+        case missingAudio
+        var errorDescription: String? { "The recording's audio file is missing." }
+    }
+
+    private func processMeeting(_ meeting: Meeting) async {
+        guard !isProcessing else { return }
+        isProcessing = true
+        errorMessage = nil
+        lastReport = nil
+        defer {
+            isProcessing = false
+            processingStage = ""
+        }
+
+        do {
+            // Transcript and summary are cached on the meeting, so a Retry after an
+            // output failure re-runs only the output (no second Groq bill).
+            let transcript: String
+            if let existing = meeting.transcript, !existing.isEmpty {
+                transcript = existing
+            } else {
+                guard let audioURL = meeting.audioURL else { throw PipelineError.missingAudio }
+                meeting.status = .transcribing
+                processingStage = "Transcribing…"
+                let language = selectedLanguageRaw == "auto" ? nil : selectedLanguageRaw
+                let transcription = try await groqClient.transcribe(audioURL: audioURL, language: language)
+                meeting.transcript = transcription.text
+                transcript = transcription.text
+            }
+
+            let summary: MeetingSummary
+            if let existing = meeting.summary {
+                summary = existing
+            } else {
+                meeting.status = .summarizing
+                processingStage = "Summarizing…"
+                summary = try await groqClient.summarize(transcript: transcript, meetingDate: meeting.startDate)
+                meeting.summary = summary
+            }
+
+            meeting.status = .saving
+            processingStage = "Saving…"
+            let report = await deliverOutputs(meeting: meeting, summary: summary)
+
+            if !report.nothingEnabled && !report.savedSomewhere {
+                // The selected destination failed: surface it and allow Retry.
+                meeting.status = .failed
+                errorMessage = report.failures.joined(separator: "\n")
+            } else {
+                meeting.status = .completed
+                lastReport = report
+            }
+
+            // Delete the WAV only once the notes are durably stored somewhere
+            // (clipboard alone doesn't count — it's ephemeral).
+            let durablySaved = report.notionURL != nil || report.markdownURL != nil
+            if autoDeleteAudio, durablySaved, let audioURL = meeting.audioURL {
+                try? FileManager.default.removeItem(at: audioURL)
+                meeting.audioURL = nil
+            }
+        } catch {
+            logger.error("Processing failed: \(error)")
+            errorMessage = "Processing failed: \(error.localizedDescription)"
+            meeting.status = .failed
+        }
+
+        saveHistory()
+    }
+
+    /// Writes the notes to the ONE selected destination and records the outcome
+    /// on the meeting. No ready destination → notes stay in History.
+    private func deliverOutputs(meeting: Meeting, summary: MeetingSummary) async -> OutputReport {
+        var report = OutputReport()
+        guard let destination = activeDestination else {
+            report.nothingEnabled = true
+            return report
+        }
+        let markdown = MarkdownExporter.render(meeting: meeting, summary: summary)
+
+        switch destination {
+        case .clipboard:
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            report.copied = pasteboard.setString(markdown, forType: .string)
+            if !report.copied { report.failures.append("Clipboard: couldn't copy") }
+            meeting.clipboardCopied = report.copied
+
+        case .notion:
+            switch await Self.sendToNotion(client: notionClient, meeting: meeting, summary: summary) {
+            case .success(let urlString):
+                report.notionURL = URL(string: urlString)
+                meeting.notionPageURL = urlString
+            case .failure(let error):
+                logger.error("Notion output failed: \(error)")
+                report.failures.append("Notion: \(error.localizedDescription)")
+            }
+
+        case .markdown:
+            let folder = MarkdownExporter.folderURL(from: markdownFolder)
+            let fileName = MarkdownExporter.fileName(for: meeting)
+            switch await Self.writeMarkdown(markdown: markdown, folder: folder, fileName: fileName) {
+            case .success(let url):
+                report.markdownURL = url
+                meeting.markdownFileURL = url
+            case .failure(let error):
+                logger.error("Markdown output failed: \(error)")
+                report.failures.append("Markdown: \(error.localizedDescription)")
+            }
+        }
+        return report
+    }
+
+    private nonisolated static func sendToNotion(
+        client: NotionClient, meeting: Meeting, summary: MeetingSummary
+    ) async -> Result<String, any Error> {
+        do { return .success(try await client.createMeetingPage(meeting: meeting, summary: summary)) }
+        catch { return .failure(error) }
+    }
+
+    private nonisolated static func writeMarkdown(
+        markdown: String, folder: URL, fileName: String
+    ) async -> Result<URL, any Error> {
+        do { return .success(try MarkdownExporter.write(markdown, to: folder, fileName: fileName)) }
+        catch { return .failure(error) }
+    }
+
+    var canRetry: Bool {
+        guard let meeting = currentMeeting, meeting.status == .failed, !isProcessing else { return false }
+        return meeting.audioURL != nil || !(meeting.transcript ?? "").isEmpty
+    }
+
+    func retryProcessing() async {
+        guard canRetry, let meeting = currentMeeting else { return }
+        errorMessage = nil
+        await processMeeting(meeting)
+    }
+
+    /// "Dismiss" on a failure: clear the error and start fresh next time.
+    /// The failed meeting stays in History (audio kept) for later.
+    func dismissFailure() {
+        errorMessage = nil
+        if currentMeeting?.status == .failed { currentMeeting = nil }
+    }
+
+    // MARK: - Window/Process Selection
+
+    /// Window-mode source list. Never called at launch — only on explicit user
+    /// action — so it can't trigger the Screen Recording prompt by itself.
+    func refreshAvailableSources() async {
+        do {
+            let box = try await fetchSCContentBox()
+            availableWindows = box.windows.filter { !($0.title ?? "").isEmpty }
+            availableProcesses = box.apps.filter { !$0.applicationName.contains("MeetingRecorder") }
+        } catch {
+            logger.error("Failed to get shareable content: \(error)")
+        }
+    }
+
+    func selectProcessByID(_ processID: Int32) {
+        selectedProcess = availableProcesses.first { $0.processID == processID }
+        selectedWindow = availableWindows.first { $0.owningApplication?.processID == processID }
+    }
+
+    func selectWindowByID(_ windowID: CGWindowID) {
+        selectedWindow = availableWindows.first { $0.windowID == windowID }
+        selectedProcess = availableProcesses.first { $0.processID == selectedWindow?.owningApplication?.processID }
+    }
+
+    // MARK: - History Persistence
+
+    func saveHistory() {
+        if let data = try? JSONEncoder().encode(meetingHistory) {
+            UserDefaults.standard.set(data, forKey: "meetingHistory")
+        }
+    }
+
+    private func loadHistory() {
+        if let data = UserDefaults.standard.data(forKey: "meetingHistory"),
+           let history = try? JSONDecoder().decode([Meeting].self, from: data) {
+            meetingHistory = history
+        }
+    }
+
+    func deleteMeeting(_ meeting: Meeting) {
+        meetingHistory.removeAll { $0.id == meeting.id }
+        if currentMeeting?.id == meeting.id { currentMeeting = nil }
+        if let audioURL = meeting.audioURL { try? FileManager.default.removeItem(at: audioURL) }
+        saveHistory()
+    }
+
+    func clearError() { errorMessage = nil }
+
+    var selectedLanguage: TranscriptionLanguage {
+        TranscriptionLanguage(rawValue: selectedLanguageRaw) ?? .auto
+    }
+}
+
+/// Where finished notes go — exactly one at a time (radio).
+enum OutputDestination: String, CaseIterable, Identifiable, Sendable {
+    case notion
+    case markdown
+    case clipboard
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .notion: return "Notion"
+        case .markdown: return "Markdown file"
+        case .clipboard: return "Copy to clipboard"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .notion: return "n.square"
+        case .markdown: return "doc.text"
+        case .clipboard: return "doc.on.clipboard"
+        }
+    }
+}
+
+/// Settings sections the island can deep-link into.
+enum SettingsSection: String, Hashable, Sendable {
+    case notion
+    case outputs
+}
+
+enum RecordMode: String, CaseIterable, Identifiable {
+    case system = "all"
+    case window = "window"
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .system: return "All system sound (easy)"
+        case .window: return "Specific app window (cleaner)"
+        }
+    }
+}
