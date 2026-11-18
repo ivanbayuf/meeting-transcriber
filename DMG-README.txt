@@ -86,8 +86,10 @@ Meeting Transcriber — quick start
       shows on the right.
    c. To stop: hover the red bars (they turn into a stop square) and click.
    d. The island shows "Transcribing…", then "Summarizing…", then
-      "Saving…" — then shows "Notes ready" with two buttons:
-        Upload to Notion (or Google Docs / Markdown) — saves the notes.
+      "Notes ready" with two buttons:
+        Upload to Notion (or Google Docs / Markdown) — saves the notes;
+                  the island shows "Saving…", then "Saved" with an open
+                  button (↗).
         Discard — asks "Discard this meeting?"; Yes deletes the recording,
                   transcript and notes for good (No keeps them).
       Copy to clipboard skips this step and copies straight away.
