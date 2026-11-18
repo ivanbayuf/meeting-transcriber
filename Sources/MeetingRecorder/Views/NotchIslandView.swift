@@ -103,20 +103,20 @@ struct IslandShape: Shape {
 // MARK: - Motion tokens
 
 enum IslandMotion {
-    /// Enter (expand): spring WITH bounce — Ivan's call: 0.4s, 0.3 bounce
+    /// Enter (expand): spring WITH bounce — Ivan's final call: 0.3s, 0.3 bounce
     /// (Emil's top of his 0.1–0.3 band). DEBUG: `defaults write
-    /// com.ivanbayu.meetingrecorder debugSpringDuration 0.4` / `debugSpringBounce 0.3`
+    /// com.ivanbayu.meetingrecorder debugSpringDuration 0.3` / `debugSpringBounce 0.3`
     /// (seconds / 0–1, read live, no rebuild).
     static var expand: Animation {
-        let d = UserDefaults.standard.object(forKey: "debugSpringDuration") as? Double ?? 0.4
+        let d = UserDefaults.standard.object(forKey: "debugSpringDuration") as? Double ?? 0.3
         let b = UserDefaults.standard.object(forKey: "debugSpringBounce") as? Double ?? 0.3
         return .spring(duration: d, bounce: b)
     }
-    /// Exit (collapse): same family, quicker — 0.3s, a touch less bounce.
-    /// DEBUG: `debugCollapseDuration 0.3` / `debugCollapseBounce 0.2`.
+    /// Exit (collapse): same family, quicker — 0.25s, a touch less bounce.
+    /// DEBUG: `debugCollapseDuration 0.25` / `debugCollapseBounce 0.15`.
     static var collapse: Animation {
-        let d = UserDefaults.standard.object(forKey: "debugCollapseDuration") as? Double ?? 0.3
-        let b = UserDefaults.standard.object(forKey: "debugCollapseBounce") as? Double ?? 0.2
+        let d = UserDefaults.standard.object(forKey: "debugCollapseDuration") as? Double ?? 0.25
+        let b = UserDefaults.standard.object(forKey: "debugCollapseBounce") as? Double ?? 0.15
         return .spring(duration: d, bounce: b)
     }
     /// Record button mic ↔ stop swap: a binary state change, so a short
@@ -378,12 +378,31 @@ struct NotchIslandView: View {
     }
 
     private var contentTransition: AnyTransition {
+        // The card content settles INTO the opening card: fade + a small
+        // upward slide, delayed so the body waits for the card to be ~⅓ open
+        // (Emil: content never spills past a moving edge). Reduce Motion:
+        // opacity only — no slide.
         .asymmetric(
-            insertion: .opacity.animation(
+            insertion: .modifier(
+                active: ContentReveal(offsetY: reduceMotion ? 0 : 6, opacity: 0),
+                identity: ContentReveal(offsetY: 0, opacity: 1)
+            ).animation(
                 reduceMotion ? IslandMotion.contentIn : IslandMotion.contentIn.delay(IslandMotion.contentInDelay)
             ),
             removal: .opacity.animation(IslandMotion.contentOut)
         )
+    }
+
+    /// Transform/opacity-only content reveal (the slide is an `offset`, never
+    /// layout). `offsetY` is 0 when Reduce Motion is on.
+    private struct ContentReveal: ViewModifier {
+        var offsetY: CGFloat
+        var opacity: Double
+        func body(content: Content) -> some View {
+            content
+                .opacity(opacity)
+                .offset(y: offsetY)
+        }
     }
 
     private func bodyHeight(_ content: Pane) -> CGFloat {
