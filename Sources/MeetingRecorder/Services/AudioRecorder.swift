@@ -40,6 +40,20 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     // Mic-level throttle state (only touched from the mic tap queue).
     private var lastMicLevelUpdate: CFAbsoluteTime = 0
 
+    /// Which capture path a buffer came from. Mic and system audio arrive on
+    /// different queues; they are MIXED into one 16 kHz track (mic is the
+    /// clock) instead of being appended back-to-back into the same file.
+    private enum Source: String { case mic, system }
+
+    // Everything below is guarded by `writeLock` (mic tap queue + SCK queue).
+    private let writeLock = NSLock()
+    private var micConverter: AVAudioConverter?
+    private var systemConverter: AVAudioConverter?
+    /// Converted system-audio samples waiting to be mixed into the next mic buffer.
+    private var pendingSystem: [Int16] = []
+    private var loggedFirstBuffer: Set<String> = []
+    private let fileFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
+
     var outputURL_current: URL? { outputURL }
 
     /// Total PCM frames successfully written to the WAV since the last start.
@@ -53,6 +67,12 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         frameLock.lock()
         framesWritten = 0
         frameLock.unlock()
+        writeLock.lock()
+        micConverter = nil
+        systemConverter = nil
+        pendingSystem.removeAll()
+        loggedFirstBuffer.removeAll()
+        writeLock.unlock()
     }
 
     private func incrementFrameCounter(_ count: Int) {
@@ -108,16 +128,17 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         stopMicrophoneCapture()
         await stopSystemAudioCapture()
 
+        finishFile()
+
         let url = outputURL
         outputURL = nil
-        audioFile = nil
         recordingStartTime = nil
 
         DispatchQueue.main.async { [weak self] in
             self?.micLevel = 0
         }
 
-        logger.info("Recording stopped")
+        logger.info("Recording stopped: \(self.totalFrames, privacy: .public) frames (\(Double(self.totalFrames) / 16000, format: .fixed(precision: 1), privacy: .public)s) -> \(url?.lastPathComponent ?? "nil", privacy: .public)")
         return url
     }
 
@@ -151,10 +172,13 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
         engine.connect(inputNode, to: mixer, format: inputFormat)
         engine.connect(mixer, to: engine.mainMixerNode, format: targetFormat)
+        // The tap reads `mixer` (upstream); muting the main mixer only stops
+        // the mic from being monitored out of the speakers.
+        engine.mainMixerNode.outputVolume = 0
 
         mixer.installTap(onBus: 0, bufferSize: 4096, format: targetFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
-            self.writeBuffer(buffer)
+            self.writeBuffer(buffer, from: .mic)
             self.updateMicLevel(from: buffer)
         }
 
@@ -242,7 +266,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
 
         let output = SystemAudioOutput()
         output.onBuffer = { [weak self] buffer in
-            self?.writeBuffer(buffer)
+            self?.writeBuffer(buffer, from: .system)
         }
 
         try stream.addStreamOutput(output, type: SCStreamOutputType.audio, sampleHandlerQueue: DispatchQueue(label: "system-audio-queue"))
@@ -276,7 +300,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
 
         let output = SystemAudioOutput()
         output.onBuffer = { [weak self] buffer in
-            self?.writeBuffer(buffer)
+            self?.writeBuffer(buffer, from: .system)
         }
 
         try stream.addStreamOutput(output, type: SCStreamOutputType.audio, sampleHandlerQueue: DispatchQueue(label: "system-audio-queue"))
@@ -303,45 +327,121 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
 
     // MARK: - Buffer Writing (converts to 16kHz int16)
 
-    private func writeBuffer(_ buffer: AVAudioPCMBuffer) {
-        guard let audioFile = audioFile, isRecording else { return }
+    /// Converts to 16 kHz mono Int16 and writes. System audio is queued and
+    /// summed into the next mic buffer, so both sources share one timeline.
+    private func writeBuffer(_ buffer: AVAudioPCMBuffer, from source: Source) {
+        guard isRecording, buffer.frameLength > 0 else { return }
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        guard let audioFile else { return }
 
-        // Convert buffer to file format if needed
-        let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
+        if loggedFirstBuffer.insert(source.rawValue).inserted {
+            logger.info("First \(source.rawValue, privacy: .public) buffer: \(buffer.format.sampleRate, privacy: .public) Hz, \(buffer.format.channelCount, privacy: .public) ch, commonFormat \(buffer.format.commonFormat.rawValue, privacy: .public), \(buffer.frameLength, privacy: .public) frames")
+        }
 
-        if buffer.format.sampleRate == 16000 && buffer.format.commonFormat == .pcmFormatInt16 {
-            do {
-                try audioFile.write(from: buffer)
-                incrementFrameCounter(Int(buffer.frameLength))
-            } catch { logger.error("Write error: \(error)") }
+        let pcm: AVAudioPCMBuffer
+        if buffer.format.sampleRate == 16000 && buffer.format.commonFormat == .pcmFormatInt16 && buffer.format.channelCount == 1 {
+            pcm = buffer
         } else {
-            // Use AVAudioConverter
-            guard let converter = AVAudioConverter(from: buffer.format, to: targetFormat) else { return }
+            guard let converted = convert(buffer, from: source) else { return }
+            pcm = converted
+        }
+        guard pcm.frameLength > 0, let samples = pcm.int16ChannelData?[0] else { return }
+        let count = Int(pcm.frameLength)
 
-            let ratio = targetFormat.sampleRate / buffer.format.sampleRate
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
-            guard let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
-
-            var error: NSError?
-            var consumed = false
-            let status = converter.convert(to: converted, error: &error) { _, outStatus in
-                if consumed {
-                    outStatus.pointee = .noDataNow
-                    return nil
-                }
-                consumed = true
-                outStatus.pointee = .haveData
-                return buffer
+        switch source {
+        case .system:
+            pendingSystem.append(contentsOf: UnsafeBufferPointer(start: samples, count: count))
+            // Mic not draining (stalled / device change): write the backlog on
+            // its own so system audio is never lost; keep ~0.5 s for mixing.
+            if pendingSystem.count > 16000 {
+                let overflow = pendingSystem.count - 8000
+                writeSamples(pendingSystem[..<overflow], to: audioFile)
+                pendingSystem.removeFirst(overflow)
             }
-
-            if status == .haveData, let err = error {
-                logger.error("Convert error: \(err)")
-            } else if status == .haveData {
-                do {
-                    try audioFile.write(from: converted)
-                    incrementFrameCounter(Int(converted.frameLength))
-                } catch { logger.error("Write error: \(error)") }
+        case .mic:
+            let mixCount = min(count, pendingSystem.count)
+            for i in 0..<mixCount {
+                samples[i] = Int16(clamping: Int32(samples[i]) + Int32(pendingSystem[i]))
             }
+            pendingSystem.removeFirst(mixCount)
+            writePCM(pcm, to: audioFile)
+        }
+    }
+
+    /// One converter per source, reused so the resampler keeps its state
+    /// across buffers. Caller holds `writeLock`.
+    private func convert(_ buffer: AVAudioPCMBuffer, from source: Source) -> AVAudioPCMBuffer? {
+        let targetFormat = fileFormat
+        var cached = source == .mic ? micConverter : systemConverter
+        if cached == nil || cached?.inputFormat != buffer.format {
+            cached = AVAudioConverter(from: buffer.format, to: targetFormat)
+            if source == .mic { micConverter = cached } else { systemConverter = cached }
+        }
+        guard let converter = cached else {
+            logger.error("No converter for \(source.rawValue, privacy: .public) format \(String(describing: buffer.format), privacy: .public)")
+            return nil
+        }
+
+        let ratio = targetFormat.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
+        guard let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return nil }
+
+        var error: NSError?
+        var consumed = false
+        let status = converter.convert(to: converted, error: &error) { _, outStatus in
+            if consumed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            outStatus.pointee = .haveData
+            return buffer
+        }
+
+        // `.inputRanDry` is the NORMAL result: the block supplies one buffer
+        // then reports `.noDataNow`, so the output is shorter than its capacity
+        // but valid. The old `status == .haveData` check discarded every
+        // buffer, leaving a header-only WAV. Only `.error` is a failure.
+        if status == .error {
+            logger.error("Convert error (\(source.rawValue, privacy: .public)): \(String(describing: error), privacy: .public)")
+            return nil
+        }
+        return converted
+    }
+
+    /// Flushes system audio still waiting for a mic buffer, then closes the
+    /// file (AVAudioFile finalises the WAV header on deinit). Synchronous so
+    /// the lock is legal from `stopRecording`'s async context.
+    private func finishFile() {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        if !pendingSystem.isEmpty, let audioFile {
+            writeSamples(pendingSystem[...], to: audioFile)
+        }
+        pendingSystem.removeAll()
+        audioFile = nil
+    }
+
+    /// Caller holds `writeLock`.
+    private func writeSamples(_ samples: ArraySlice<Int16>, to file: AVAudioFile) {
+        guard !samples.isEmpty,
+              let pcm = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: AVAudioFrameCount(samples.count)),
+              let destination = pcm.int16ChannelData?[0] else { return }
+        samples.withUnsafeBufferPointer { source in
+            if let base = source.baseAddress { destination.update(from: base, count: source.count) }
+        }
+        pcm.frameLength = AVAudioFrameCount(samples.count)
+        writePCM(pcm, to: file)
+    }
+
+    /// Caller holds `writeLock`.
+    private func writePCM(_ pcm: AVAudioPCMBuffer, to file: AVAudioFile) {
+        do {
+            try file.write(from: pcm)
+            incrementFrameCounter(Int(pcm.frameLength))
+        } catch {
+            logger.error("Write error: \(error, privacy: .public)")
         }
     }
 }

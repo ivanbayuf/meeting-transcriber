@@ -23,15 +23,32 @@ enum MenuBarIcon {
     nonisolated static func make() -> NSImage {
         let size = NSSize(width: pointSize, height: pointSize)
         let image = NSImage(size: size, flipped: true) { _ in
-            // items 31 + 36: shift the glyph up ~1.85pt optically. The canvas is flipped
-            // (y-down = y-up on screen), so a downward SVG-space translation
-            // moves the drawn result upward on screen.
-            // Total 3.3 SVG units (about 1.85pt on screen).
-            var shiftDown = AffineTransform(translationByX: 0, byY: 3.3)
-            let scale = AffineTransform(scale: pointSize / 32)
+            // Item 45: vertical centering, re-derived. `flipped: true` makes the
+            // canvas y-DOWN exactly like the screen, so +y moves the glyph DOWN.
+            // (Items 31/36 added +1.8 then +3.3 SVG units believing the opposite;
+            // measured on-device that pushed the ink centre to 10.75pt of 18 and
+            // clipped the base at the bottom edge.)
+            // Ink box in points: capsule top (SVG y 4) to base line (SVG y 28.5),
+            // each widened by half the stroke → 1.55…16.73pt, centre 9.14pt.
+            // Target 0.25pt above the canvas centre (the thin stand/base read
+            // lighter than the capsule), snapped to the 2× pixel grid so the
+            // strokes keep the same crisp sub-pixel phase → −0.5pt (up).
+            // Offset is applied to the drawing context, not the path.
+            let svgScale = pointSize / 32
+            let inkTop = 4 * svgScale - strokeWidth / 2
+            let inkBottom = 28.5 * svgScale + strokeWidth / 2
+            let opticalLift: CGFloat = 0.25
+            let rawOffset = (pointSize / 2 - opticalLift) - (inkTop + inkBottom) / 2
+            let offset = (rawOffset * 2).rounded() / 2
+            NSGraphicsContext.saveGraphicsState()
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            let shift = NSAffineTransform()
+            shift.translateX(by: 0, yBy: offset)
+            shift.concat()
+
+            let scale = AffineTransform(scale: svgScale)
 
             let stroke = strokedPath()
-            stroke.transform(using: shiftDown)
             stroke.transform(using: scale)
             stroke.lineWidth = strokeWidth
             stroke.lineCapStyle = .round
@@ -40,7 +57,6 @@ enum MenuBarIcon {
             stroke.stroke()
 
             let dot = recordingDot()
-            dot.transform(using: shiftDown)
             dot.transform(using: scale)
             NSColor.black.setFill()
             dot.fill()

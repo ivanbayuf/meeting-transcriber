@@ -13,8 +13,18 @@ final class GroqClient: @unchecked Sendable {
     var apiKey: String = ""
     
     func transcribe(audioURL: URL, language: String? = nil) async throws -> TranscriptionResult {
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioURL.path)[.size] as? Int) ?? -1
         let audioDuration = try await getAudioDuration(url: audioURL)
-        logger.info("Audio duration: \(audioDuration)s")
+        logger.info("Transcribe: \(audioURL.lastPathComponent, privacy: .public), \(fileSize, privacy: .public) bytes, \(audioDuration, format: .fixed(precision: 2), privacy: .public)s, model \(self.transcriptionModel, privacy: .public), language \(language ?? "auto", privacy: .public), key set: \(!self.apiKey.isEmpty, privacy: .public)")
+        // A header-only WAV makes Groq answer 400 "audio_too_short"; say what
+        // actually happened instead.
+        guard audioDuration >= 0.1 else {
+            logger.error("Transcribe aborted: audio is empty (\(audioDuration, privacy: .public)s)")
+            throw GroqError.emptyAudio
+        }
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw GroqError.missingAPIKey
+        }
         
         if audioDuration > 600 {
             return try await transcribeChunked(audioURL: audioURL, language: language)
@@ -53,22 +63,40 @@ final class GroqClient: @unchecked Sendable {
         
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
+        logger.info("POST /audio/transcriptions: \(body.count, privacy: .public)-byte multipart body")
         
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            logger.error("Transcription request failed (network): \(error, privacy: .public)")
+            throw error
+        }
         
         guard let httpResponse = response as? HTTPURLResponse else {
+            logger.error("Transcription: non-HTTP response")
             throw GroqError.invalidResponse
         }
+        logger.info("Transcription HTTP \(httpResponse.statusCode, privacy: .public), \(data.count, privacy: .public) bytes")
         
         if httpResponse.statusCode == 429 {
             throw GroqError.rateLimited
         }
         if httpResponse.statusCode != 200 {
             let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
+            logger.error("Transcription error body: \(errorText, privacy: .public)")
             throw GroqError.apiError(httpResponse.statusCode, errorText)
         }
         
-        let result = try JSONDecoder().decode(GroqTranscriptionResponse.self, from: data)
+        let result: GroqTranscriptionResponse
+        do {
+            result = try JSONDecoder().decode(GroqTranscriptionResponse.self, from: data)
+        } catch {
+            logger.error("Transcription decode failed: \(error, privacy: .public) body: \(String(decoding: data.prefix(500), as: UTF8.self), privacy: .public)")
+            throw error
+        }
+        logger.info("Transcribed \(result.text.count, privacy: .public) chars, language \(result.language ?? "?", privacy: .public), duration \(result.duration, privacy: .public)s")
         
         return TranscriptionResult(
             text: result.text,
@@ -153,8 +181,10 @@ final class GroqClient: @unchecked Sendable {
         if httpResponse.statusCode == 429 {
             throw GroqError.rateLimited
         }
+        logger.info("Summary (\(model, privacy: .public)) HTTP \(httpResponse.statusCode, privacy: .public)")
         if httpResponse.statusCode != 200 {
             let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
+            logger.error("Summary error body: \(errorText, privacy: .public)")
             throw GroqError.apiError(httpResponse.statusCode, errorText)
         }
         
@@ -273,6 +303,7 @@ enum GroqError: LocalizedError {
     case apiError(Int, String)
     case parsingError(String)
     case missingAPIKey
+    case emptyAudio
     
     var errorDescription: String? {
         switch self {
@@ -281,6 +312,7 @@ enum GroqError: LocalizedError {
         case .apiError(let code, let msg): return "Groq API error \(code): \(msg)"
         case .parsingError(let msg): return "Failed to parse response: \(msg)"
         case .missingAPIKey: return "Groq API key not configured"
+        case .emptyAudio: return "The recording contains no audio, so there is nothing to transcribe. Record again."
         }
     }
 }

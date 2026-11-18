@@ -469,7 +469,9 @@ final class MeetingManager: ObservableObject {
         // Groq pipeline (avoids the 400 "audio too short"). Keep the temp file.
         let frames = audioRecorder.totalFrames
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioURL.path)[.size] as? Int) ?? 0
+        logger.info("Stop: \(frames, privacy: .public) frames, \(fileSize, privacy: .public) bytes at \(audioURL.lastPathComponent, privacy: .public)")
         if frames == 0 || fileSize <= 44 {
+            logger.error("Empty-audio guard tripped (frames \(frames, privacy: .public), size \(fileSize, privacy: .public)) — no capture buffers were written")
             meeting.status = .failed
             errorMessage = "No audio captured — check Screen & System Audio and Microphone permissions, then record again"
             saveHistory()
@@ -543,7 +545,7 @@ final class MeetingManager: ObservableObject {
                 meeting.audioURL = nil
             }
         } catch {
-            logger.error("Processing failed: \(error)")
+            logger.error("Processing failed at \(self.processingStage, privacy: .public): \(error.localizedDescription, privacy: .public) [\(String(describing: error), privacy: .public)]")
             errorMessage = "Processing failed: \(error.localizedDescription)"
             meeting.status = .failed
         }

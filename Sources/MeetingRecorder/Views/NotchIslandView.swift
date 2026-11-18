@@ -18,7 +18,11 @@ struct IslandMetrics: Equatable {
     /// the morph spring's small overshoot aren't clipped by the panel edge.
     static let shadowInset: CGFloat = 32
     /// Tallest body below the top row (outputs/history pages).
-    static let maxBodyHeight: CGFloat = 184
+    /// Item 43: 192 (was 184). Recording-state outputs content is
+    /// 4 + 16 + 4 + (32 + 40 + 32 + 2×4) + 6 + 30 + 12 = 184 — zero slack, so
+    /// any text-metric rounding ate the 12pt bottom inset. +8 leaves the
+    /// Spacer room and keeps the bottom bar pinned exactly 12pt from the edge.
+    static let maxBodyHeight: CGFloat = 192
     /// Expanded card width. Widened to 330 (item 27) so the "Send notes" section
     /// has room. Still clears "Window"/"Help" menus on a 14" display. Tune here.
     static let baseExpandedWidth: CGFloat = 330
@@ -684,6 +688,13 @@ struct NotchIslandView: View {
                 }
                 .buttonStyle(PressScaleStyle())
                 .accessibilityLabel("Stop recording")
+                // Items 43 + 44: the red capsule is the visible edge here, and it
+                // sat at the 4pt outer inset — 12pt from the bottom but only 4pt
+                // from the side, crowding the 20pt corner. +8 → 12pt side ==
+                // 12pt bottom, and the Stop shifts right onto the card's 12pt
+                // rhythm (top-row controls, row text). Padding sits outside the
+                // Button so the press-scale anchor/hit area are unchanged.
+                .padding(.leading, 8)
 
                 // item 20 island: mic level meter, hidden when not recording
                 MicLevelBar(level: manager.audioRecorder.micLevel)
