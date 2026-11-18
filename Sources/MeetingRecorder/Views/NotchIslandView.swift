@@ -31,13 +31,24 @@ struct IslandMetrics: Equatable {
     /// wings sit either side of the camera housing (nothing can draw under it).
     static let idleWing: CGFloat = 40
     /// While recording the wings widen just enough for the live timer.
-    static let recordingWing: CGFloat = 56
-    static let wingPadding: CGFloat = 8
+    /// Fits the timer box: inset 4 + 7 + dot 6 + 5 + "00:00" ≈36 + 7 ≈ 65.
+    static let recordingWing: CGFloat = 66
     static let collapsedBottomRadius: CGFloat = 12
     /// Expanded: square top corners (flush with the screen edge, like the
     /// notch), rounded bottom.
     static let expandedBottomRadius: CGFloat = 20
     static let horizontalPadding: CGFloat = 12
+    /// Radius of the concave "ears" that flare the top corners into the screen edge.
+    static let earRadius: CGFloat = 8
+
+    /// Top-row controls are 24pt boxes. The gap from a box to the island's side
+    /// equals the gap above/below it, so left, right, top and bottom all match.
+    static let controlSize: CGFloat = 24
+    /// Space between a glyph and the edge of its (highlightable) box.
+    static let controlContentInset: CGFloat = 7
+    var controlEdgeInset: CGFloat { max(4, (topBarHeight - Self.controlSize) / 2) }
+    /// Concentric with the collapsed island corner: outer radius minus the gap.
+    var controlCornerRadius: CGFloat { max(4, Self.collapsedBottomRadius - controlEdgeInset) }
 
     var hasNotch: Bool { notchWidth > 0 }
     func collapsedWidth(recording: Bool) -> CGFloat {
@@ -99,6 +110,23 @@ struct IslandShape: Shape {
         p.addLine(to: CGPoint(x: rect.minX, y: rect.minY + t))
         p.addArc(tangent1End: CGPoint(x: rect.minX, y: rect.minY),
                  tangent2End: CGPoint(x: rect.minX + t, y: rect.minY), radius: t)
+        p.closeSubpath()
+        return p
+    }
+}
+
+/// Concave fillet that flares the island's top-left corner into the screen edge,
+/// like the hardware notch. Drawn in an r×r box to the LEFT of the card; mirror
+/// with scaleEffect(x: -1) for the right side. The arc is tangent to the top
+/// edge and the card's side, so it is a true quarter circle centred at (0, r).
+struct IslandEar: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        p.addArc(tangent1End: CGPoint(x: rect.maxX, y: rect.minY),
+                 tangent2End: CGPoint(x: rect.minX, y: rect.minY), radius: rect.width)
         p.closeSubpath()
         return p
     }
@@ -167,12 +195,22 @@ struct ClampedHeight: ViewModifier, Animatable {
 struct ElementHoverScale: ViewModifier {
     @Binding var isHovering: Bool
     var enabled: Bool = true
+    var cornerRadius: CGFloat = 8
+    /// Off for wide controls: 1.1× on a ~65pt box grows ~3pt per side and eats the 4pt edge gap.
+    var scales: Bool = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
+        let lit = isHovering && enabled
         content
-            .scaleEffect(isHovering && enabled && !reduceMotion ? 1.06 : 1)
-            .animation(reduceMotion ? nil : .spring(duration: 0.25, bounce: 0.3), value: isHovering)
+            // The highlight IS the control's box (glyph centred, 7pt each side), so it
+            // is always centred on the glyph. Scale alone was too subtle.
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.white.opacity(lit ? 0.14 : 0))
+            )
+            .scaleEffect(lit && scales && !reduceMotion ? 1.1 : 1)
+            .animation(reduceMotion ? nil : .spring(duration: 0.25, bounce: 0.3), value: lit)
             .onHover { isHovering = $0 }
             .onDisappear { isHovering = false }
     }
@@ -311,7 +349,7 @@ struct NotchIslandView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// What the card body shows. (Not "Body" — that name is View's associated type.)
-    enum Pane: Hashable { case outputs, history, processing, success, failure, permission }
+    enum Pane: Hashable { case outputs, history, processing, success, failure }
 
     /// One-by-one content reveal: when the card expands, elements flip from
     /// hidden to visible with a 0.05s step (staggeredReveal); on collapse they
@@ -333,7 +371,6 @@ struct NotchIslandView: View {
     /// Priority: an active pipeline or a blocker outranks whatever page the user was on.
     private var currentPane: Pane {
         if manager.isProcessing { return .processing }
-        if manager.permissionNeeded { return .permission }
         if manager.errorMessage != nil { return .failure }
         if model.flash != nil { return .success }
         return model.page == .history ? .history : .outputs
@@ -341,7 +378,7 @@ struct NotchIslandView: View {
 
     /// States that hold the card open regardless of hover.
     private func isPinned(_ pane: Pane) -> Bool {
-        pane == .processing || pane == .failure || pane == .success || pane == .permission
+        pane == .processing || pane == .failure || pane == .success
     }
 
     var body: some View {
@@ -359,8 +396,10 @@ struct NotchIslandView: View {
         // the shape snaps (no movement); content still crossfades.
             .animation(reduceMotion ? nil : (open ? IslandMotion.expand : IslandMotion.collapse),
                        value: LayoutKey(open: open, pane: content, recording: recording))
-            .onReceive(manager.$lastReport.compactMap { $0 }.removeDuplicates()) { report in
-                model.presentSuccess(report)
+            // onChange, not onReceive: a publisher built inside body is re-subscribed on every
+            // render and replays lastReport, so presentSuccess → re-render → replay looped forever.
+            .onChange(of: manager.lastReport) { _, report in
+                if let report { model.presentSuccess(report) }
             }
             // One-by-one reveal: on open (or page switch) reset and re-run the
             // stagger; on close everything just fades out fast (no stagger).
@@ -404,6 +443,9 @@ struct NotchIslandView: View {
         // Pure black in both states — no material — so it reads as the notch.
         .background(Color.black)
         .clipShape(shape)
+        // Ears sit outside the clip so the top corners curve out into the menu bar.
+        .overlay(alignment: .topLeading) { ear.offset(x: -IslandMetrics.earRadius) }
+        .overlay(alignment: .topTrailing) { ear.scaleEffect(x: -1).offset(x: IslandMetrics.earRadius) }
         .shadow(color: .black.opacity(open ? 0.45 : 0), radius: 18, x: 0, y: 10)
         // item 34: pill-wide overlay REMOVED — per-element hover fills are on
         // RecordControlButton, chevron, and collapsedClock individually.
@@ -417,6 +459,13 @@ struct NotchIslandView: View {
                 model.hoverChanged(false)
             }
         }
+    }
+
+    private var ear: some View {
+        IslandEar()
+            .fill(Color.black)
+            .frame(width: IslandMetrics.earRadius, height: IslandMetrics.earRadius)
+            .allowsHitTesting(false)
     }
 
     private var contentTransition: AnyTransition {
@@ -461,21 +510,17 @@ struct NotchIslandView: View {
     private func bodyHeight(_ content: Pane) -> CGFloat {
         switch content {
         case .outputs, .history: return IslandMetrics.maxBodyHeight
-        case .processing: return 64
+        case .processing: return 40
         // Items 29 + 42: 12pt bottom inset with space for the card contents.
-        case .failure, .permission: return 116
+        case .failure: return 116
         case .success: return successHeight(model.flash)
         }
     }
 
     private func successHeight(_ report: OutputReport?) -> CGFloat {
-        guard let report else { return 64 }
-        var lines = report.failures.count
-        if report.notionURL != nil { lines += 1 }
-        if report.markdownURL != nil { lines += 1 }
-        if report.copied { lines += 1 }
-        if report.nothingEnabled { lines += 1 }
-        return min(IslandMetrics.maxBodyHeight, 44 + CGFloat(max(lines, 1)) * 22)
+        // One headline row (matches the 40pt processing row) + a line per failure.
+        let failures = CGFloat(report?.failures.count ?? 0)
+        return min(IslandMetrics.maxBodyHeight, 40 + failures * 22)
     }
 
     // MARK: Top row
@@ -490,25 +535,30 @@ struct NotchIslandView: View {
         HStack(spacing: 0) {
             recordControl(open: open)
                 .modifier(ElementHoverScale(isHovering: $recordHovering,
-                                            enabled: !manager.isProcessing && groqKeyValid))
+                                            enabled: !manager.isProcessing && groqKeyValid,
+                                            cornerRadius: metrics.controlCornerRadius))
             Spacer(minLength: 0)
             ZStack(alignment: .trailing) {
                 if recording && !open {
                     // Collapsed + recording: blinking dot + timer (items 22, 24)
                     collapsedClock
-                        .modifier(ElementHoverScale(isHovering: $clockHovering))
+                        .modifier(ElementHoverScale(isHovering: $clockHovering,
+                                                    cornerRadius: metrics.controlCornerRadius,
+                                                    scales: false))
                         .transition(.opacity)
                 } else {
                     chevron(open: open, content: content)
                         .modifier(ElementHoverScale(
                             isHovering: $chevronHovering,
-                            enabled: !(content == .processing || content == .failure || content == .permission)
+                            enabled: !(content == .processing || content == .failure),
+                            cornerRadius: metrics.controlCornerRadius
                         ))
                         .transition(.opacity)
                 }
             }
         }
-        .padding(.horizontal, open ? IslandMetrics.horizontalPadding : IslandMetrics.wingPadding)
+        // Same inset open or collapsed: glyphs land ~11pt in, on the body's 12pt text edge.
+        .padding(.horizontal, metrics.controlEdgeInset)
     }
 
     // MARK: Record control (items 19 + 25)
@@ -519,6 +569,7 @@ struct NotchIslandView: View {
             isProcessing: manager.isProcessing,
             groqKeyValid: groqKeyValid,
             isHovered: recordHovering,
+            recorder: manager.audioRecorder,
             action: { toggleRecording() }
         )
     }
@@ -539,26 +590,23 @@ struct NotchIslandView: View {
     @ViewBuilder
     private var collapsedClock: some View {
         if let start = manager.recordingStartedAt {
-            HStack(spacing: 5) {
-                // item 24: blinking red dot, steady ~1s cadence
-                BlinkingDot()
-
-                Button { model.toggleExpanded() } label: {
+            // Dot + time are ONE box (one button, one highlight), same 7pt inset as the glyphs.
+            Button { model.toggleExpanded() } label: {
+                HStack(spacing: 5) {
+                    BlinkingDot()
                     RecordingClock(start: start)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Color.white.opacity(0.9))
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
-                        // item 22: balance right padding to 12pt rhythm (wingPadding on each side)
-                        .padding(.leading, 2)
-                        .padding(.trailing, IslandMetrics.wingPadding)
-                        .frame(height: 24)
-                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .help("Expand")
-                .accessibilityLabel("Recording time")
+                .padding(.horizontal, IslandMetrics.controlContentInset)
+                .frame(height: IslandMetrics.controlSize)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .help("Expand")
+            .accessibilityLabel("Recording time")
         }
     }
 
@@ -573,7 +621,7 @@ struct NotchIslandView: View {
         }
         .buttonStyle(PressScaleStyle())
         // Can't fold away a running pipeline or an unacknowledged blocker.
-        .disabled(content == .processing || content == .failure || content == .permission)
+        .disabled(content == .processing || content == .failure)
         .help(open ? "Collapse" : "Expand")
         .accessibilityLabel(open ? "Collapse" : "Expand")
     }
@@ -588,7 +636,6 @@ struct NotchIslandView: View {
         case .processing: processingPage
         case .success: successPage(model.flash)
         case .failure: failurePage
-        case .permission: permissionPage
         }
     }
 
@@ -760,22 +807,26 @@ struct NotchIslandView: View {
     }
 
     private var processingPage: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
+        // One row: stage on the left, destination on the right — keeps the card short.
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            // Baseline-aligned: 14pt and 11pt text centred on their boxes look misaligned.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(manager.processingStage.isEmpty ? "Working…" : manager.processingStage)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.white)
+                Spacer(minLength: 8)
+                Text(destinationsLine)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.white.opacity(0.5))
+                    .lineLimit(1)
             }
-            Text(destinationsLine)
-                .font(.system(size: 11))
-                .foregroundStyle(Color.white.opacity(0.5))
-                .lineLimit(1)
         }
+        .frame(height: 24)
         .padding(.horizontal, IslandMetrics.horizontalPadding)
-        .padding(.top, 6)
-        .frame(width: metrics.expandedWidth, height: 64, alignment: .topLeading)
+        .padding(.top, 4) // row 4…28 in the 40pt body: 12pt below, matching the side insets
+        .frame(width: metrics.expandedWidth, height: 40, alignment: .topLeading)
     }
 
     private var destinationsLine: String {
@@ -786,47 +837,45 @@ struct NotchIslandView: View {
     }
 
     private func successPage(_ report: OutputReport?) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        // One row, mirroring the processing row it replaces: ✓ headline on the left,
+        // "open" on the right. Only one destination is ever active, so one headline fits.
+        let headline: String
+        var open: (url: URL, help: String)? = nil
+        if let url = report?.notionURL {
+            headline = "Saved to Notion"; open = (url, "Open in Notion")
+        } else if let url = report?.markdownURL {
+            headline = "Saved \(url.lastPathComponent)"; open = (url, "Open the Markdown file")
+        } else if report?.copied == true {
+            headline = "Copied to clipboard"
+        } else if report?.nothingEnabled == true {
+            headline = "Kept in History"
+        } else {
+            headline = "Saved"
+        }
+
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 16))
+                    .font(.system(size: 14))
                     .foregroundStyle(Color.green)
-                Text("Saved")
+                Text(headline)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.white)
-            }
-            .frame(height: 20)
-
-            if let report {
-                VStack(alignment: .leading, spacing: 0) {
-                    if let url = report.notionURL {
-                        ResultLine(icon: "n.square", text: "Saved to Notion", actionHelp: "Open in Notion") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                    if let url = report.markdownURL {
-                        ResultLine(
-                            icon: "doc.text",
-                            text: "Wrote \(url.deletingLastPathComponent().lastPathComponent)/\(url.lastPathComponent)",
-                            actionHelp: "Open the Markdown file"
-                        ) {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                    if report.copied {
-                        ResultLine(icon: "doc.on.clipboard", text: "Copied to clipboard")
-                    }
-                    if report.nothingEnabled {
-                        ResultLine(icon: "clock.arrow.circlepath", text: "Kept in History — no destination set up")
-                    }
-                    ForEach(report.failures, id: \.self) { failure in
-                        ResultLine(icon: "exclamationmark.triangle.fill", text: failure, tint: .yellow)
-                    }
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8)
+                if let open {
+                    OpenLinkButton(help: open.help) { NSWorkspace.shared.open(open.url) }
                 }
+            }
+            .frame(height: 24)
+
+            ForEach(report?.failures ?? [], id: \.self) { failure in
+                ResultLine(icon: "exclamationmark.triangle.fill", text: failure, tint: .yellow)
             }
         }
         .padding(.horizontal, IslandMetrics.horizontalPadding)
-        .padding(.top, 6)
+        .padding(.top, 4)
         .frame(width: metrics.expandedWidth, height: successHeight(report), alignment: .topLeading)
     }
 
@@ -868,64 +917,6 @@ struct NotchIslandView: View {
         .frame(width: metrics.expandedWidth, height: 116, alignment: .topLeading)
     }
 
-    /// The user grants access in System Settings; "Try again" re-fires the
-    /// system request via manager.requestScreenCaptureAccess().
-    private var permissionPage: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "rectangle.dashed.badge.record")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.orange)
-                    .frame(width: 16)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Screen & System Audio permission needed")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.white)
-                    Text("Allow MeetingRecorder under Privacy & Security → Screen & System Audio Recording, then reopen the app.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color.white.opacity(0.6))
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            HStack(spacing: 8) {
-                // Item 39: tertiary text action on the leading edge — three pills
-                // won't fit in the 306pt row. Re-fires the system request; on
-                // grant permissionNeeded clears and the pane swaps out. Press
-                // feedback is PressScaleStyle (transform/opacity only).
-                Button {
-                    manager.requestScreenCaptureAccess()
-                } label: {
-                    Text("Try again")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.7))
-                        .lineLimit(1)
-                        .fixedSize()
-                        .frame(height: 26)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PressScaleStyle())
-                .help("Request Screen & System Audio access again")
-                Spacer(minLength: 0)
-                Button("Not now") {
-                    manager.dismissPermissionCard()
-                    model.collapseNow()
-                }
-                .buttonStyle(PillButtonStyle())
-                Button("Open System Settings") {
-                    manager.openScreenCapturePrivacySettings()
-                }
-                .buttonStyle(PillButtonStyle(prominent: true))
-            }
-        }
-        // item 29: 14pt bottom padding — matches the left/right 12pt rhythm so buttons don't
-        // crowd the bottom edge.
-        .padding(.horizontal, IslandMetrics.horizontalPadding)
-        .padding(.top, 6)
-        .padding(.bottom, 12)
-        .frame(width: metrics.expandedWidth, height: 116, alignment: .topLeading)
-    }
-
     // MARK: Actions
 
     private func toggleRecording() {
@@ -952,9 +943,6 @@ struct GroqOnboardingCard: View {
     @ObservedObject var manager: MeetingManager
     // ORCHESTRATOR-GLUE: manager.groqKeyState: GroqKeyState, manager.verifyGroqKey() async -> Bool
 
-    @AppStorage("groqAPIKey", store: UserDefaults(suiteName: "com.ivanbayu.meetingrecorder"))
-    private var groqAPIKey: String = ""
-
     @State private var isVerifying = false
 
     var body: some View {
@@ -963,7 +951,7 @@ struct GroqOnboardingCard: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(0.7))
 
-            SecureField("sk-…", text: $groqAPIKey)
+            SecureField("sk-…", text: $manager.groqAPIKey)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(Color.white)
@@ -990,7 +978,7 @@ struct GroqOnboardingCard: View {
                     }
                 }
                 .buttonStyle(PillButtonStyle(prominent: true, compact: true))
-                .disabled(groqAPIKey.isEmpty || isVerifying)
+                .disabled(manager.groqAPIKey.isEmpty || isVerifying)
 
                 // Inline status chip: ✓ green / ✗ error line
                 groqKeyStatusView
@@ -1037,35 +1025,42 @@ struct RecordControlButton: View {
     var isProcessing: Bool
     var groqKeyValid: Bool
     var isHovered: Bool
+    @ObservedObject var recorder: AudioRecorder
     var action: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private enum Glyph { case mic, wave, stop, busy }
+    private var glyph: Glyph {
+        if isProcessing { return .busy }
+        if !isRecording { return .mic }
+        return isHovered ? .stop : .wave
+    }
+
     var body: some View {
         Button(action: action) {
+            // All four glyphs stay mounted and cross-morph (scale + blur + fade) on one
+            // spring, so mic → waveform → stop is one continuous, interruptible motion.
             ZStack {
-                if isProcessing {
-                    ProgressView()
-                        .controlSize(.mini)
-                } else {
-                    // item 19: no circle, glyph color carries the state.
-                    if isRecording {
-                        ZStack {
-                            RecordingWaveform(active: !isHovered)
-                                .opacity(isHovered ? 0 : 1)
-                                .scaleEffect(isHovered ? 0.72 : 1)
-                            RoundedRectangle(cornerRadius: 1.8, style: .continuous)
-                                .fill(Color.red)
-                                .frame(width: 9, height: 9)
-                                .opacity(isHovered ? 1 : 0)
-                                .scaleEffect(isHovered ? 1 : 0.72)
-                        }
-                        .animation(reduceMotion ? nil : .spring(duration: 0.2, bounce: 0.3), value: isHovered)
-                    } else {
-                        RecordFace(kind: .mic, pulses: false)
-                    }
-                }
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white)
+                    .offset(y: -1) // mic.fill's stand pulls its optical centre low
+                    .modifier(GlyphMorph(visible: glyph == .mic, reduceMotion: reduceMotion))
+                RecordingWaveform(level: recorder.audioLevel, active: glyph == .wave)
+                    .modifier(GlyphMorph(visible: glyph == .wave, reduceMotion: reduceMotion))
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Color.red)
+                    .frame(width: 9, height: 9)
+                    .modifier(GlyphMorph(visible: glyph == .stop, reduceMotion: reduceMotion))
+                ProgressView()
+                    .controlSize(.mini)
+                    .modifier(GlyphMorph(visible: glyph == .busy, reduceMotion: reduceMotion))
             }
-            .frame(width: 24, height: 24)
+            // Glyph centred in its box; the box (= hover highlight) is square for mic/stop
+            // and widens for the 21pt waveform, keeping the same 7pt inset each side.
+            .frame(width: glyph == .wave ? 21 + 2 * IslandMetrics.controlContentInset : IslandMetrics.controlSize,
+                   height: IslandMetrics.controlSize)
+            .animation(reduceMotion ? IslandMotion.reducedFade : .spring(duration: 0.3, bounce: 0.2), value: glyph)
             .contentShape(Rectangle())
         }
         .buttonStyle(PressScaleStyle())
@@ -1076,27 +1071,47 @@ struct RecordControlButton: View {
     }
 }
 
-/// Five red rounded bars pulse with staggered phases. TimelineView owns the
-/// clock and pauses entirely when inactive or Reduce Motion is enabled.
+/// Outgoing glyph shrinks, blurs and fades; incoming does the reverse. Blur makes
+/// the shapes melt into each other instead of reading as two overlapping icons.
+struct GlyphMorph: ViewModifier {
+    var visible: Bool
+    var reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(visible ? 1 : 0)
+            .scaleEffect(visible || reduceMotion ? 1 : 0.55)
+            .blur(radius: visible || reduceMotion ? 0 : 3)
+    }
+}
+
+/// Five red bars driven by the live audio level (mic + system). Silence rests
+/// at a low floor; speech lifts the bars in a centre-weighted shape, with a
+/// little per-bar wobble so loud passages don't look like one block.
 struct RecordingWaveform: View {
+    /// 0…1 from AudioRecorder.audioLevel.
+    var level: Float
     var active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private let heights: [CGFloat] = [0.42, 0.72, 1.0, 0.72, 0.42]
+    private let shape: [CGFloat] = [0.55, 0.8, 1.0, 0.8, 0.55]
+    private let floor: CGFloat = 0.22
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active || reduceMotion)) { context in
-            let elapsed = context.date.timeIntervalSinceReferenceDate
+            let t = context.date.timeIntervalSinceReferenceDate
+            // sqrt lifts quiet speech so normal talking visibly moves the bars.
+            let lvl = CGFloat(sqrt(max(0, min(level, 1))))
             HStack(alignment: .center, spacing: 2) {
-                ForEach(0..<5, id: \.self) { index in
-                    let phase = reduceMotion ? 0 : (elapsed * 2 * .pi / 1.2 - Double(index) * 0.15 * 2 * .pi / 1.2)
-                    let pulse: CGFloat = reduceMotion ? 0.72 : CGFloat(0.55 + 0.45 * ((sin(phase) + 1) / 2))
+                ForEach(0..<5, id: \.self) { i in
+                    let wobble = reduceMotion ? 1 : 0.8 + 0.2 * CGFloat(sin(t * 9 + Double(i) * 1.7))
                     Capsule()
                         .fill(Color.red)
                         .frame(width: 2.5, height: 15)
-                        .scaleEffect(y: pulse * heights[index], anchor: .center)
+                        .scaleEffect(y: floor + (1 - floor) * lvl * shape[i] * wobble, anchor: .center)
                 }
             }
+            .animation(.easeOut(duration: 0.1), value: level)
             .frame(width: 21, height: 20)
         }
         .accessibilityHidden(true)
@@ -1362,20 +1377,30 @@ struct ResultLine: View {
                 .truncationMode(.middle)
             Spacer(minLength: 4)
             if let action {
-                Button(action: action) {
-                    Image(systemName: "arrow.up.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.7))
-                        .frame(width: 22, height: 22)
-                        .background(Circle().fill(Color.white.opacity(0.1)))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(PressScaleStyle())
-                .help(actionHelp ?? "Open")
-                .accessibilityLabel(actionHelp ?? "Open")
+                OpenLinkButton(help: actionHelp ?? "Open", action: action)
             }
         }
         .frame(height: 22)
+    }
+}
+
+/// Small round ↗ button that opens a saved result.
+struct OpenLinkButton: View {
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.up.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.7))
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Color.white.opacity(0.1)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressScaleStyle())
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 
@@ -1563,7 +1588,8 @@ final class NotchIslandPanel: NSPanel {
         }
     }
 
-    override var canBecomeKey: Bool { false }
+    // Must be key so the Groq key field can take typing; .nonactivatingPanel keeps the app from activating.
+    override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
     /// Borderless windows may sit over the menu bar; never let AppKit nudge it down.

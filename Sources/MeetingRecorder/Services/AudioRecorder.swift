@@ -22,6 +22,9 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     @Published var currentDuration: TimeInterval = 0
     /// Mic input level, 0...1, updated ~10 Hz from the mic tap. Published on main.
     @Published var micLevel: Float = 0
+    /// Loudest of mic and system audio, 0…1 at ~20 Hz — drives the island waveform
+    /// so it moves for your voice AND the other participants.
+    @Published var audioLevel: Float = 0
 
     private var outputURL: URL?
     private var audioFile: AVAudioFile?
@@ -39,6 +42,8 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
 
     // Mic-level throttle state (only touched from the mic tap queue).
     private var lastMicLevelUpdate: CFAbsoluteTime = 0
+    private var sourceLevels: [Source: Float] = [:]      // guarded by writeLock
+    private var lastAudioLevelUpdate: CFAbsoluteTime = 0 // guarded by writeLock
 
     /// Which capture path a buffer came from. Mic and system audio arrive on
     /// different queues; they are MIXED into one 16 kHz track (mic is the
@@ -136,6 +141,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
 
         DispatchQueue.main.async { [weak self] in
             self?.micLevel = 0
+            self?.audioLevel = 0
         }
 
         logger.info("Recording stopped: \(self.totalFrames, privacy: .public) frames (\(Double(self.totalFrames) / 16000, format: .fixed(precision: 1), privacy: .public)s) -> \(url?.lastPathComponent ?? "nil", privacy: .public)")
@@ -176,7 +182,8 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         // the mic from being monitored out of the speakers.
         engine.mainMixerNode.outputVolume = 0
 
-        mixer.installTap(onBus: 0, bufferSize: 4096, format: targetFormat) { [weak self] buffer, _ in
+        // 1024 frames ≈ 64 ms at 16 kHz (was 4096 ≈ 256 ms): fast enough for a live waveform.
+        mixer.installTap(onBus: 0, bufferSize: 1024, format: targetFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
             self.writeBuffer(buffer, from: .mic)
             self.updateMicLevel(from: buffer)
@@ -193,6 +200,22 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         micEngine?.stop()
         micEngine = nil
         micMixer = nil
+    }
+
+    /// Per-source RMS (before mixing) → publishes the louder one, ~20 Hz. Caller holds writeLock.
+    private func updateAudioLevel(samples: UnsafeMutablePointer<Int16>, count: Int, source: Source) {
+        var sumSquares: Float = 0
+        for i in 0..<count {
+            let s = Float(samples[i]) / 32768
+            sumSquares += s * s
+        }
+        // Same mapping as the mic meter: ~0.25 RMS (loud speech) fills the bar.
+        sourceLevels[source] = min(sqrtf(sumSquares / Float(count)) * 4, 1)
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastAudioLevelUpdate >= 0.05 else { return }
+        lastAudioLevelUpdate = now
+        let level = sourceLevels.values.max() ?? 0
+        DispatchQueue.main.async { [weak self] in self?.audioLevel = level }
     }
 
     /// RMS of the tap buffer → 0...1, throttled to ~10 Hz, hopped to main.
@@ -348,6 +371,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
         guard pcm.frameLength > 0, let samples = pcm.int16ChannelData?[0] else { return }
         let count = Int(pcm.frameLength)
+        updateAudioLevel(samples: samples, count: count, source: source)
 
         switch source {
         case .system:

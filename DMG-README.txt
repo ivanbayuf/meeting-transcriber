@@ -20,6 +20,11 @@ MeetingRecorder — quick start
    Both are in: System Settings > Privacy & Security.
    If you turn one on, quit and re-open the app once.
 
+   After installing a NEW version, macOS treats it as a different app:
+   in Screen & System Audio Recording, select MeetingRecorder, press "-"
+   to remove it, then press Record again and allow it. (Or run this in
+   Terminal: tccutil reset ScreenCapture com.ivanbayu.meetingrecorder)
+
 4) ADD YOUR OWN GROQ API KEY (required, free)
    The app uses YOUR key — it doesn't ship with anyone's.
      a. Get a free key: https://console.groq.com  (sign up > API keys)
@@ -57,11 +62,25 @@ MeetingRecorder — quick start
 6) CHOOSE WHERE YOUR NOTES GO
    In the island, pick ONE: Notion / Markdown folder / clipboard.
    - Notion: only after you finished step 5.
-   - Markdown: pick the folder first ("Choose folder...").
+   - Markdown: pick the folder first ("Choose directory").
    - Clipboard: nothing to set — notes are copied when the meeting ends.
 
+7) RECORD A MEETING
+   a. Click the mic icon on the left of the island to start.
+   b. While recording, the mic turns into red bars that move with the
+      sound — your voice and the other people in the call. The timer
+      shows on the right.
+   c. To stop: hover the red bars (they turn into a stop square) and click.
+   d. The island shows "Transcribing…", then "Summarizing…", then
+      "Saving…", and finally "Saved to Notion" with an open button (↗).
+
+   What you get: a page/file titled after what the meeting was about
+   (written by the AI), with the summary, decisions, action items, open
+   questions and topics. Notion pages hold the summary only; Markdown files
+   and the clipboard also include the full transcript.
+
 Notes:
-   - Nothing is recorded until you press the red record button.
+   - Nothing is recorded until you press the record (mic) button.
    - Audio is kept only until your notes are saved successfully, then deleted.
    - Mixed languages are fine (English, Indonesian, Japanese, and mixes).
    - If a model stops working (Groq sometimes retires them): Settings >

@@ -227,28 +227,10 @@ final class MeetingManager: ObservableObject {
 
     // MARK: Screen & System Audio permission
 
-    /// True when Record needed ScreenCaptureKit and it wasn't granted. Drives
-    /// the island's permission card; never re-triggers the system prompt.
-    @Published private(set) var permissionNeeded = false
-
-    func dismissPermissionCard() { permissionNeeded = false }
-
-    /// Item 39: explicit retry entry point, called by the island permission
-    /// card's "Try again" button (NotchIslandView.permissionPage). Requests
-    /// exactly once and, on grant, clears `permissionNeeded` so the record
-    /// button becomes usable.
-    func requestScreenCaptureAccess() {
-        // One request per explicit retry. If already granted, just clear state.
-        if CGPreflightScreenCaptureAccess() {
-            permissionNeeded = false
-            return
-        }
-        // Fires CGRequestScreenCaptureAccess exactly once. The system prompt
-        // (or System Settings row) is logged on return whether granted or not.
-        // Usually false (the prompt is async); the user must record again after
-        // enabling in System Settings. Honour a true return so the card clears.
-        permissionNeeded = !CGRequestScreenCaptureAccess()
-    }
+    /// No in-app permission card: macOS's own dialog covers the first ask. It only
+    /// appears once per app, so after one failed Record press we open the
+    /// Settings pane directly instead of leaving later presses silent.
+    private var askedForScreenCapture = false
 
     func openScreenCapturePrivacySettings() {
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
@@ -343,7 +325,6 @@ final class MeetingManager: ObservableObject {
         guard !isRecording, !isProcessing else { return }
         errorMessage = nil
         lastReport = nil
-        permissionNeeded = false
         micPermissionNeeded = false
         // Item 39: entering startRecording is a fresh Record press. A stale
         // pendingDisplay from a prior attempt (which may have been captured
@@ -378,7 +359,12 @@ final class MeetingManager: ObservableObject {
                     isRecording = true
                     return
                 }
-                permissionNeeded = true
+                // Nothing was recorded: drop the placeholder so History has no stuck "Recording" rows.
+                meetingHistory.removeAll { $0.id == meeting.id }
+                currentMeeting = nil
+                saveHistory()
+                if askedForScreenCapture { openScreenCapturePrivacySettings() }
+                askedForScreenCapture = true
                 return
             }
         }
@@ -424,10 +410,14 @@ final class MeetingManager: ObservableObject {
             return pendingDisplay
         }
         if !CGPreflightScreenCaptureAccess() {
-            // Request once per Record press. On denial (or TCC reset), still
-            // attempt the fetch — SCDisplay fetch will surface the exact error,
-            // and the system will have logged this request against the app.
-            _ = CGRequestScreenCaptureAccess()
+            // Request once per Record press. Don't fall through to the
+            // SCShareableContent fetch when not granted: without permission it
+            // fires a second, duplicate system prompt.
+            guard CGRequestScreenCaptureAccess() else {
+                logger.info("Screen capture permission not granted")
+                pendingDisplay = nil
+                return nil
+            }
         }
         do {
             let box = try await fetchSCContentBox()
@@ -522,6 +512,8 @@ final class MeetingManager: ObservableObject {
                 processingStage = "Summarizing…"
                 summary = try await groqClient.summarize(transcript: transcript, meetingDate: meeting.startDate)
                 meeting.summary = summary
+                // Contextual title replaces the generic "System Audio Meeting" everywhere (Notion, Markdown, History).
+                if let title = summary.title { meeting.title = title }
             }
 
             meeting.status = .saving

@@ -4,7 +4,7 @@ final class Meeting: Identifiable, Codable, @unchecked Sendable {
     let id: UUID
     let startDate: Date
     var endDate: Date?
-    let title: String
+    var title: String
     var transcript: String?
     var summary: MeetingSummary?
     var audioURL: URL?
@@ -77,6 +77,8 @@ struct MeetingSummary: Codable {
     let actionPoints: [ActionPoint]
     let openQuestions: [OpenQuestion]
     let keyTopics: [String]
+    /// Short contextual title from Groq; optional so history saved before it decodes.
+    var title: String? = nil
 }
 
 struct KeyDecision: Identifiable, Codable {
@@ -203,10 +205,11 @@ struct NotionDateProperty: Codable {
     let type: String = "date"
 }
 
+/// Date-only values ("yyyy-MM-dd"). Notion rejects `time_zone` on a date
+/// without a time ("… has an invalid date"), so none is sent.
 struct NotionDate: Codable {
     let start: String
     let end: String?
-    let time_zone: String? = TimeZone.current.identifier
 }
 
 struct NotionSelectProperty: Codable {
@@ -214,9 +217,10 @@ struct NotionSelectProperty: Codable {
     let type: String = "select"
 }
 
+/// Name only. Sending a `color` that differs from the existing option's
+/// colour makes Notion reject the page ("Select option color doesn't match").
 struct NotionSelectOption: Codable {
     let name: String
-    let color: String? = "blue"
 }
 
 struct NotionRichText: Codable {

@@ -24,10 +24,25 @@ final class NotionClient: @unchecked Sendable {
     }
     
     private func buildPageRequest(meeting: Meeting, summary: MeetingSummary) -> NotionPageRequest {
+        // Due dates are parsed from "yyyy-MM-dd" at UTC midnight (GroqClient),
+        // so they must be formatted back in UTC or they shift a day west of GMT.
         let dateFormatter = ISO8601DateFormatter()
         dateFormatter.formatOptions = [.withFullDate]
-        
-        let title = meeting.title.isEmpty ? "Meeting \(dateFormatter.string(from: meeting.startDate))" : meeting.title
+
+        // The meeting's own date is a wall-clock moment: format it in the
+        // user's time zone (UTC would date a 6am Jakarta meeting yesterday).
+        let meetingDateFormatter = ISO8601DateFormatter()
+        meetingDateFormatter.formatOptions = [.withFullDate]
+        meetingDateFormatter.timeZone = .current
+
+        let meetingStart = meetingDateFormatter.string(from: meeting.startDate)
+        // Only send `end` when the meeting crossed midnight; otherwise Notion
+        // shows a pointless "Nov 18 → Nov 18" range.
+        let meetingEnd = meeting.endDate
+            .map { meetingDateFormatter.string(from: $0) }
+            .flatMap { $0 == meetingStart ? nil : $0 }
+
+        let title = meeting.title.isEmpty ? "Meeting \(meetingStart)" : meeting.title
         
         var children: [NotionBlock] = []
         
@@ -78,16 +93,15 @@ final class NotionClient: @unchecked Sendable {
                 children.append(bulletBlock("\u{2022} \(topic)"))
             }
         }
-        
-        if let transcript = meeting.transcript, !transcript.isEmpty {
-            children.append(toggleBlock("Full Transcript", [paragraphBlock(transcript)]))
-        }
-        
+
+        // The transcript is deliberately NOT sent: the page holds only the
+        // summary sections. (It also broke the 2,000-char rich_text limit.)
+
         return NotionPageRequest(
             parent: NotionParent(database_id: databaseID),
             properties: NotionProperties(
                 title: NotionTitleProperty(title: [NotionRichText(text: NotionText(content: title))]),
-                date: NotionDateProperty(date: NotionDate(start: dateFormatter.string(from: meeting.startDate), end: meeting.endDate.map { dateFormatter.string(from: $0) })),
+                date: NotionDateProperty(date: NotionDate(start: meetingStart, end: meetingEnd)),
                 status: NotionSelectProperty(select: NotionSelectOption(name: "Done"))
             ),
             children: children
@@ -134,10 +148,6 @@ final class NotionClient: @unchecked Sendable {
     
     private func bulletBlock(_ text: String) -> NotionBlock {
         NotionBlock(type: "bulleted_list_item", heading_1: nil, heading_2: nil, heading_3: nil, paragraph: nil, bulleted_list_item: NotionListItem(rich_text: [NotionRichText(text: NotionText(content: text))]), toggle: nil, children: nil)
-    }
-    
-    private func toggleBlock(_ title: String, _ children: [NotionBlock]) -> NotionBlock {
-        NotionBlock(type: "toggle", heading_1: nil, heading_2: nil, heading_3: nil, paragraph: nil, bulleted_list_item: nil, toggle: NotionToggle(rich_text: [NotionRichText(text: NotionText(content: title))], children: children), children: nil)
     }
     
     func testConnection() async -> Bool {

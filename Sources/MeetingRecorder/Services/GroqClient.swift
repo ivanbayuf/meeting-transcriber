@@ -197,6 +197,7 @@ final class GroqClient: @unchecked Sendable {
     private let summarySystemPrompt = """
 You are an expert meeting summarizer. Output ONLY valid JSON matching this exact schema:
 {
+  "title": "string - 3 to 7 word title naming what this meeting was about",
   "summary": "string - what the meeting covered and what was concluded",
   "keyDecisions": [{"decision": "string", "context": "string"}],
   "actionPoints": [{"task": "string", "owner": "string", "dueDate": "ISO8601 date string or null", "dueDateString": "original text or null"}],
@@ -210,6 +211,7 @@ Rules:
 - Key decisions: only explicit decisions made, not discussion points.
 - Open questions: questions raised but not answered.
 - Key topics: 3-7 main subjects discussed.
+- Title: specific to the content (e.g. "Q3 Budget Review with Finance"), in the transcript's language, no date, no quotes, no trailing period.
 """
     
     private func buildSummaryPrompt(transcript: String, meetingDate: Date) -> String {
@@ -231,6 +233,7 @@ Rules:
         }
         
         struct SummaryJSON: Codable {
+            let title: String?
             let summary: String
             let keyDecisions: [DecisionJSON]
             let actionPoints: [ActionPointJSON]
@@ -268,7 +271,10 @@ Rules:
                 return ActionPoint(task: ap.task, owner: ap.owner, dueDate: date, dueDateString: ap.dueDateString)
             },
             openQuestions: parsed.openQuestions.map { OpenQuestion(question: $0.question, context: $0.context) },
-            keyTopics: parsed.keyTopics
+            keyTopics: parsed.keyTopics,
+            title: parsed.title
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"."))) }
+                .flatMap { $0.isEmpty ? nil : $0 }
         )
     }
     
