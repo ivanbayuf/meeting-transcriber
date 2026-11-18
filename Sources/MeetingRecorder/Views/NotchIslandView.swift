@@ -103,17 +103,16 @@ struct IslandShape: Shape {
 // MARK: - Motion tokens
 
 enum IslandMotion {
-    /// Pill ↔ card (hover / click — interactive, so a spring). Snappy with ONE
-    /// small visible overshoot: response 0.28s, damping 0.72 ≈ 4% overshoot,
-    /// settled in ~0.3s. Retargets mid-flight if hover flips.
-    /// DEBUG override: `defaults write com.ivanbayu.meetingrecorder
-    /// debugSpringResponse 0.4` and/or `debugSpringDamping 0.75` retunes the
-    /// expand/collapse spring without a rebuild (0/absent = spec values).
+    /// Pill ↔ card (click — interactive, so a spring). Emil-style duration/bounce
+    /// spring: duration 0.4s, bounce 0.15 (his "Apple-style, easy to reason about"
+    /// — interruptible/reversible, small overshoot only).
+    /// DEBUG overrides: `defaults write com.ivanbayu.meetingrecorder
+    /// debugSpringDuration 0.5` and `debugSpringBounce 0.2` (both read live, no
+    /// rebuild; absent keys = the defaults above).
     static var morph: Animation {
-        let response = UserDefaults.standard.double(forKey: "debugSpringResponse")
-        let damping = UserDefaults.standard.double(forKey: "debugSpringDamping")
-        guard response > 0 else { return Animation.spring(response: 0.28, dampingFraction: 0.72) }
-        return Animation.spring(response: response, dampingFraction: damping > 0 ? damping : 0.72)
+        let duration = UserDefaults.standard.object(forKey: "debugSpringDuration") as? Double ?? 0.4
+        let bounce = UserDefaults.standard.object(forKey: "debugSpringBounce") as? Double ?? 0.15
+        return Animation.spring(duration: duration, bounce: bounce)
     }
     /// Record button mic ↔ stop swap: a binary state change, so a short
     /// scale+opacity crossfade on a slightly faster spring (~0.2s) with a
@@ -439,6 +438,10 @@ struct NotchIslandView: View {
     /// True when the Groq key is present and verified (item 13 island side).
     /// ORCHESTRATOR-GLUE: manager.groqKeyState must conform to GroqKeyState pattern-matched below.
     private var groqKeyValid: Bool {
+        // DEBUG override: `defaults write com.ivanbayu.meetingrecorder
+        // debugSkipGroqGate -bool true` opens the record gate for animation
+        // inspection without a verified key.
+        if UserDefaults.standard.bool(forKey: "debugSkipGroqGate") { return true }
         if case .valid = manager.groqKeyState { return true }
         return false
     }

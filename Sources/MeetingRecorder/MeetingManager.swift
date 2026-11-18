@@ -283,6 +283,17 @@ final class MeetingManager: ObservableObject {
         migrateLegacyOutputs()
         // No SCShareableContent fetch here: it waits for the first Record press,
         // so launching never pops the Screen Recording prompt.
+
+        // Auto-verify a pre-loaded Groq key at launch so the island's record
+        // gate opens without a manual "Save & Verify" (item 13). Debug override:
+        // `defaults write com.ivanbayu.meetingrecorder debugSkipGroqGate -bool true`
+        // skips the gate entirely.
+        if !groqAPIKey.isEmpty {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                _ = await self.verifyGroqKey()
+            }
+        }
     }
 
     /// One-time move from the three output bools to `outputDestination`.
