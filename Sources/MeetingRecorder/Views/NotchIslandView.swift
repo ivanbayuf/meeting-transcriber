@@ -103,20 +103,20 @@ struct IslandShape: Shape {
 // MARK: - Motion tokens
 
 enum IslandMotion {
-    /// Enter (expand): spring WITH bounce — Ivan's call: 0.6s duration, 0.2
-    /// bounce (Emil's Apple-style spring, bounce kept in his 0.1–0.3 band).
-    /// DEBUG: `defaults write com.ivanbayu.meetingrecorder debugSpringDuration 0.6`
-    /// and `debugSpringBounce 0.2` (seconds / 0–1, read live, no rebuild).
+    /// Enter (expand): spring WITH bounce — Ivan's call: 0.4s, 0.3 bounce
+    /// (Emil's top of his 0.1–0.3 band). DEBUG: `defaults write
+    /// com.ivanbayu.meetingrecorder debugSpringDuration 0.4` / `debugSpringBounce 0.3`
+    /// (seconds / 0–1, read live, no rebuild).
     static var expand: Animation {
-        let d = UserDefaults.standard.object(forKey: "debugSpringDuration") as? Double ?? 0.6
-        let b = UserDefaults.standard.object(forKey: "debugSpringBounce") as? Double ?? 0.2
+        let d = UserDefaults.standard.object(forKey: "debugSpringDuration") as? Double ?? 0.4
+        let b = UserDefaults.standard.object(forKey: "debugSpringBounce") as? Double ?? 0.3
         return .spring(duration: d, bounce: b)
     }
-    /// Exit (collapse): same family, quicker — 0.4s, a touch less bounce.
-    /// DEBUG: `debugCollapseDuration 0.4` / `debugCollapseBounce 0.15`.
+    /// Exit (collapse): same family, quicker — 0.3s, a touch less bounce.
+    /// DEBUG: `debugCollapseDuration 0.3` / `debugCollapseBounce 0.2`.
     static var collapse: Animation {
-        let d = UserDefaults.standard.object(forKey: "debugCollapseDuration") as? Double ?? 0.4
-        let b = UserDefaults.standard.object(forKey: "debugCollapseBounce") as? Double ?? 0.15
+        let d = UserDefaults.standard.object(forKey: "debugCollapseDuration") as? Double ?? 0.3
+        let b = UserDefaults.standard.object(forKey: "debugCollapseBounce") as? Double ?? 0.2
         return .spring(duration: d, bounce: b)
     }
     /// Record button mic ↔ stop swap: a binary state change, so a short
