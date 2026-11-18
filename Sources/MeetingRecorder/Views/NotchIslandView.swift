@@ -106,7 +106,15 @@ enum IslandMotion {
     /// Pill ↔ card (hover / click — interactive, so a spring). Snappy with ONE
     /// small visible overshoot: response 0.28s, damping 0.72 ≈ 4% overshoot,
     /// settled in ~0.3s. Retargets mid-flight if hover flips.
-    static let morph = Animation.spring(response: 0.28, dampingFraction: 0.72)
+    /// DEBUG override: `defaults write com.ivanbayu.meetingrecorder
+    /// debugSpringResponse 0.4` and/or `debugSpringDamping 0.75` retunes the
+    /// expand/collapse spring without a rebuild (0/absent = spec values).
+    static var morph: Animation {
+        let response = UserDefaults.standard.double(forKey: "debugSpringResponse")
+        let damping = UserDefaults.standard.double(forKey: "debugSpringDamping")
+        guard response > 0 else { return Animation.spring(response: 0.28, dampingFraction: 0.72) }
+        return Animation.spring(response: response, dampingFraction: damping > 0 ? damping : 0.72)
+    }
     /// Record button mic ↔ stop swap: a binary state change, so a short
     /// scale+opacity crossfade on a slightly faster spring (~0.2s) with a
     /// small overshoot — re-taps feel instant.
@@ -188,11 +196,16 @@ final class IslandModel: ObservableObject {
         guard hovering != isHovering else { return }
         isHovering = hovering
         hoverTask?.cancel()
-        if !hovering {
-            // Grace window: if the pointer left while expanded, schedule collapse.
-            scheduleCollapse(after: Self.hoverCloseGrace)
+        if hovering {
+            // DEBUG override: `defaults write com.ivanbayu.meetingrecorder
+            // debugHoverExpand -bool true` restores hover-to-expand for
+            // animation inspection. Off by default (item 21 kept click-only).
+            guard UserDefaults.standard.bool(forKey: "debugHoverExpand") else { return }
+            expand()
+            return
         }
-        // On hover-enter we do NOT start any expand task (item 21).
+        // Grace window: if the pointer left while expanded, schedule collapse.
+        scheduleCollapse(after: Self.hoverCloseGrace)
     }
 
     /// Chevron / status-item click: instant, no delays. Only way to expand.

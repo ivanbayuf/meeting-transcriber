@@ -321,20 +321,30 @@ final class MeetingManager: ObservableObject {
         permissionNeeded = false
         micPermissionNeeded = false
 
+        let meeting = Meeting(title: recordMode == .system ? "System Audio Meeting" : (selectedWindow?.title ?? "Meeting"))
+        currentMeeting = meeting
+        meetingHistory.insert(meeting, at: 0)
+        saveHistory()
+
         // System audio needs the display list — fetched only now, on Record.
         var display: SCDisplay?
         if recordMode == .system {
             display = await displayForRecording()
             guard display != nil else {
+                // DEBUG override: `defaults write com.ivanbayu.meetingrecorder
+                // debugBypassPermissions -bool true` enters the recording UI
+                // state anyway, for animation inspection — no capture engine
+                // starts, so Stop ends with the "No audio recorded" card.
+                if UserDefaults.standard.bool(forKey: "debugBypassPermissions") {
+                    meeting.status = .recording
+                    recordingStartedAt = Date()
+                    isRecording = true
+                    return
+                }
                 permissionNeeded = true
                 return
             }
         }
-
-        let meeting = Meeting(title: recordMode == .system ? "System Audio Meeting" : (selectedWindow?.title ?? "Meeting"))
-        currentMeeting = meeting
-        meetingHistory.insert(meeting, at: 0)
-        saveHistory()
 
         let audioURL = tempDirectory.appendingPathComponent("\(meeting.id.uuidString).wav")
 
