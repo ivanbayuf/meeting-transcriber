@@ -98,8 +98,9 @@ Meeting Transcriber — quick start
 Notes:
    - Nothing is recorded until you press the record (mic) button.
    - Audio is kept only until your notes are saved successfully, then deleted.
-     It is uploaded to Groq compressed (about 120 KB per minute), so meetings
-     of up to ~3 hours work on Groq's free plan.
+     It is uploaded to Groq compressed (about 120 KB per minute). Long meetings
+     are processed 10 minutes at a time while you record, so notes are ready
+     seconds after you stop. Groq's free plan covers about 8 hours a day.
    - Mixed languages are fine (English, Indonesian, Japanese, and mixes).
    - If a model stops working (Groq sometimes retires them): Settings >
      Groq > "Advanced" to pick a different model.

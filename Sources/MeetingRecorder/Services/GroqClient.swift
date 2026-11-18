@@ -188,22 +188,74 @@ final class GroqClient: @unchecked Sendable {
         return TranscriptionResult(text: allText, language: detectedLanguage, duration: totalDuration, segments: allSegments)
     }
     
-    func summarize(transcript: String, meetingDate: Date) async throws -> MeetingSummary {
-        logger.info("Generating summary for transcript (\(transcript.count) chars)")
-        
-        let prompt = buildSummaryPrompt(transcript: transcript, meetingDate: meetingDate)
-        
+    /// Free Groq keys allow 8,000 tokens per minute for the summary model, so one
+    /// request can't hold much more than ~25 min of talk. Long transcripts are
+    /// summarised in parts (pausing when Groq says to), then the parts are merged.
+    func summarize(transcript: String, meetingDate: Date,
+                   onProgress: @escaping @Sendable (String) -> Void = { _ in }) async throws -> MeetingSummary {
+        let parts = Self.transcriptParts(transcript)
+        logger.info("Generating summary for transcript (\(transcript.count) chars, \(parts.count, privacy: .public) part(s))")
+        let date = Self.isoDate(meetingDate)
+
+        guard parts.count > 1 else {
+            return try parseSummaryJSON(try await chatJSON(
+                "Meeting date: \(date)\nTranscript:\n\(transcript)\n\nGenerate the structured summary as JSON."))
+        }
+
+        var partials: [String] = []
+        for (index, part) in parts.enumerated() {
+            onProgress("Summarizing part \(index + 1) of \(parts.count)…")
+            partials.append(try await summarizePart(part, meetingDate: meetingDate))
+        }
+        onProgress("Combining \(parts.count) parts…")
+        return try await combine(partials, meetingDate: meetingDate)
+    }
+
+    /// Notes (raw JSON) for one stretch of a longer meeting. Used for transcript parts
+    /// after recording and for the 10-minute chunks summarised live during it.
+    func summarizePart(_ text: String, meetingDate: Date) async throws -> String {
+        try await chatJSON("""
+            Meeting date: \(Self.isoDate(meetingDate))
+            This is ONE PART of a longer meeting's transcript (it may start or end mid-topic; other parts are summarised separately).
+            Transcript part:
+            \(text)
+
+            Generate the structured summary of THIS PART as JSON.
+            """)
+    }
+
+    /// Merges part notes (in order) into one set of minutes for the whole meeting.
+    func combine(_ partials: [String], meetingDate: Date) async throws -> MeetingSummary {
+        guard partials.count > 1 else { return try parseSummaryJSON(partials.first ?? "{}") }
+        let numbered = partials.enumerated().map { "Part \($0.offset + 1):\n\($0.element)" }.joined(separator: "\n\n")
+        return try parseSummaryJSON(try await chatJSON("""
+            Meeting date: \(Self.isoDate(meetingDate))
+            Below are JSON notes for \(partials.count) consecutive parts of ONE meeting, in order.
+            Merge them into ONE set of notes for the whole meeting, same JSON schema:
+            - one title and one purpose for the whole meeting
+            - key points: combine and de-duplicate; keep the most important (5-12)
+            - keep every decision and action point (with owners and dates), de-duplicated
+            - open questions: drop any that a later part answered
+            - key topics: 3-7 for the whole meeting
+
+            \(numbered)
+            """))
+    }
+
+    /// One JSON-mode chat call: waits and retries on 429 (Groq says how long), then
+    /// falls back to the other model; also falls back on Groq server errors.
+    private func chatJSON(_ prompt: String) async throws -> String {
         do {
-            return try await summarizeWithModel(prompt: prompt, model: summaryModel)
+            return try await chatJSON(prompt, model: summaryModel)
         } catch GroqError.rateLimited {
-            logger.warning("Rate limited, trying fallback: \(self.fallbackSummaryModel)")
-            return try await summarizeWithModel(prompt: prompt, model: self.fallbackSummaryModel)
+            logger.warning("Still rate limited, trying fallback: \(self.fallbackSummaryModel, privacy: .public)")
+            return try await chatJSON(prompt, model: fallbackSummaryModel)
         } catch GroqError.apiError(let code, _) where code >= 500 {
-            return try await summarizeWithModel(prompt: prompt, model: self.fallbackSummaryModel)
+            return try await chatJSON(prompt, model: fallbackSummaryModel)
         }
     }
-    
-    private func summarizeWithModel(prompt: String, model: String) async throws -> MeetingSummary {
+
+    private func chatJSON(_ prompt: String, model: String) async throws -> String {
         let requestBody = GroqChatRequest(
             model: model,
             messages: [
@@ -214,35 +266,86 @@ final class GroqClient: @unchecked Sendable {
             maxTokens: 4096,
             responseFormat: GroqResponseFormat(type: "json_object")
         )
-        
         var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(requestBody)
-        
-        let (data, response) = try await session.data(for: request)
-        
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GroqError.invalidResponse
+
+        // Per-minute token limits refill within a minute: wait as told, a few times.
+        for attempt in 1...4 {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else { throw GroqError.invalidResponse }
+            logger.info("Summary (\(model, privacy: .public)) HTTP \(httpResponse.statusCode, privacy: .public)")
+
+            if httpResponse.statusCode == 429 {
+                let wait = min(65, max(2, Double(httpResponse.value(forHTTPHeaderField: "retry-after") ?? "") ?? 20))
+                logger.info("Rate limited (attempt \(attempt, privacy: .public)); waiting \(wait, privacy: .public)s")
+                if attempt == 4 { break }
+                try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                continue
+            }
+            if httpResponse.statusCode != 200 {
+                let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
+                logger.error("Summary error body: \(errorText, privacy: .public)")
+                throw GroqError.apiError(httpResponse.statusCode, errorText)
+            }
+            let chatResponse = try JSONDecoder().decode(GroqChatResponse.self, from: data)
+            return chatResponse.choices.first?.message.content ?? "{}"
         }
-        
-        if httpResponse.statusCode == 429 {
-            throw GroqError.rateLimited
-        }
-        logger.info("Summary (\(model, privacy: .public)) HTTP \(httpResponse.statusCode, privacy: .public)")
-        if httpResponse.statusCode != 200 {
-            let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
-            logger.error("Summary error body: \(errorText, privacy: .public)")
-            throw GroqError.apiError(httpResponse.statusCode, errorText)
-        }
-        
-        let chatResponse = try JSONDecoder().decode(GroqChatResponse.self, from: data)
-        let content = chatResponse.choices.first?.message.content ?? "{}"
-        
-        return try parseSummaryJSON(content)
+        throw GroqError.rateLimited
     }
-    
+
+    /// Splits a transcript into parts of at most `maxTokens` (estimated), on sentence
+    /// boundaries. Non-ASCII characters count ~1 token each (Japanese, etc.), ASCII ~¼.
+    static func transcriptParts(_ text: String, maxTokens: Double = 3_000) -> [String] {
+        func tokens<S: StringProtocol>(_ s: S) -> Double { s.unicodeScalars.reduce(0) { $0 + ($1.isASCII ? 0.25 : 1) } }
+        guard tokens(text) > maxTokens else { return [text] }
+
+        // Sentences: break after . ! ? 。 ！ ？ or a newline.
+        var sentences: [Substring] = []
+        var start = text.startIndex
+        for index in text.indices where ".!?。！？\n".contains(text[index]) {
+            let next = text.index(after: index)
+            sentences.append(text[start..<next])
+            start = next
+        }
+        if start < text.endIndex { sentences.append(text[start...]) }
+
+        var parts: [String] = []
+        var current = ""
+        var currentTokens = 0.0
+        func flush() {
+            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { parts.append(trimmed) }
+            current = ""; currentTokens = 0
+        }
+        for sentence in sentences {
+            var remaining = Substring(sentence)
+            // A run-on "sentence" bigger than a part (no punctuation) is cut by characters.
+            while tokens(remaining) > maxTokens {
+                flush()
+                var cut = remaining.startIndex, used = 0.0
+                while cut < remaining.endIndex, used + tokens(String(remaining[cut])) <= maxTokens {
+                    used += tokens(String(remaining[cut])); cut = remaining.index(after: cut)
+                }
+                parts.append(String(remaining[..<cut]))
+                remaining = remaining[cut...]
+            }
+            let t = tokens(remaining)
+            if currentTokens + t > maxTokens { flush() }
+            current += remaining; currentTokens += t
+        }
+        flush()
+        return parts
+    }
+
+    private static func isoDate(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withFullDate]
+        return formatter.string(from: date)
+    }
+
     private let summarySystemPrompt = """
 You are an expert meeting summarizer. Output ONLY valid JSON matching this exact schema:
 {
@@ -266,14 +369,6 @@ Rules:
 - Key topics: 3-7 main subjects discussed.
 - Title: specific to the content (e.g. "Q3 Budget Review with Finance"), in the transcript's language, no date, no quotes, no trailing period.
 """
-    
-    private func buildSummaryPrompt(transcript: String, meetingDate: Date) -> String {
-        let dateFormatter = ISO8601DateFormatter()
-        dateFormatter.formatOptions = [.withFullDate]
-        let meetingDateString = dateFormatter.string(from: meetingDate)
-        
-        return "Meeting date: \(meetingDateString)\nTranscript:\n\(transcript)\n\nGenerate the structured summary as JSON."
-    }
     
     private func parseSummaryJSON(_ jsonString: String) throws -> MeetingSummary {
         let cleaned = jsonString

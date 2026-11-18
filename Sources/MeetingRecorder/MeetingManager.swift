@@ -353,6 +353,9 @@ final class MeetingManager: ObservableObject {
         set { recordModeRaw = newValue.rawValue }
     }
 
+    /// Background work for the recording in progress (nil after it's been used).
+    private var livePipeline: LivePipeline?
+
     func startRecording() async {
         guard !isRecording, !isProcessing else { return }
         errorMessage = nil
@@ -367,6 +370,13 @@ final class MeetingManager: ObservableObject {
         saveHistory()
 
         let audioURL = tempDirectory.appendingPathComponent("\(meeting.id.uuidString).wav")
+
+        // Transcribe + summarise each 10-min chunk in the background while recording.
+        let pipeline = LivePipeline(groq: groqClient,
+                                    language: selectedLanguageRaw == "auto" ? nil : selectedLanguageRaw,
+                                    meetingDate: meeting.startDate)
+        livePipeline = pipeline
+        audioRecorder.onSegment = { url, index, isLast in pipeline.add(url, index: index, isLast: isLast) }
 
         do {
             meeting.status = .recording
@@ -384,6 +394,8 @@ final class MeetingManager: ObservableObject {
             recordingStartedAt = Date()
             isRecording = true
         } catch {
+            audioRecorder.onSegment = nil
+            livePipeline = nil
             if let recorderError = error as? AudioRecorderError,
                case .micPermissionDenied = recorderError {
                 micPermissionNeeded = true
@@ -450,25 +462,42 @@ final class MeetingManager: ObservableObject {
             // Transcript and summary are cached on the meeting, so a Retry after an
             // output failure re-runs only the output (no second Groq bill).
             let transcript: String
+            var livePartials: [String] = []
             if let existing = meeting.transcript, !existing.isEmpty {
                 transcript = existing
             } else {
-                guard let audioURL = meeting.audioURL else { throw PipelineError.missingAudio }
                 meeting.status = .transcribing
                 processingStage = "Transcribing…"
-                let language = selectedLanguageRaw == "auto" ? nil : selectedLanguageRaw
-                let transcription = try await groqClient.transcribe(audioURL: audioURL, language: language)
-                meeting.transcript = transcription.text
-                transcript = transcription.text
+                let pipeline = livePipeline
+                livePipeline = nil
+                if let live = await pipeline?.finish(), !live.transcript.isEmpty {
+                    // Everything but the last chunk was done during the meeting.
+                    transcript = live.transcript
+                    livePartials = live.partials
+                } else {
+                    // No live result (short-circuited, failed, or a Retry): whole recording.
+                    guard let audioURL = meeting.audioURL else { throw PipelineError.missingAudio }
+                    let language = selectedLanguageRaw == "auto" ? nil : selectedLanguageRaw
+                    transcript = try await groqClient.transcribe(audioURL: audioURL, language: language).text
+                }
+                meeting.transcript = transcript
             }
 
             let summary: MeetingSummary
             if let existing = meeting.summary {
                 summary = existing
+            } else if !livePartials.isEmpty {
+                meeting.status = .summarizing
+                processingStage = livePartials.count > 1 ? "Combining \(livePartials.count) parts…" : "Summarizing…"
+                summary = try await groqClient.combine(livePartials, meetingDate: meeting.startDate)
+                meeting.summary = summary
+                if let title = summary.title { meeting.title = title }
             } else {
                 meeting.status = .summarizing
                 processingStage = "Summarizing…"
-                summary = try await groqClient.summarize(transcript: transcript, meetingDate: meeting.startDate)
+                summary = try await groqClient.summarize(transcript: transcript, meetingDate: meeting.startDate) { [weak self] stage in
+                    Task { @MainActor in self?.processingStage = stage }
+                }
                 meeting.summary = summary
                 // Contextual title replaces the generic "System Audio Meeting" everywhere (Notion, Markdown, History).
                 if let title = summary.title { meeting.title = title }

@@ -9,6 +9,8 @@ a Markdown folder, or your clipboard.
   the "System Audio Recording" and Microphone permissions, not Screen Recording
 - Meeting minutes in one format everywhere: purpose, key points, decisions,
   action items (checkboxes), open questions & risks
+- Works on long meetings: each 10 minutes is transcribed and summarised in the
+  background while you record, so notes are ready seconds after you stop
 - Mixed languages are fine (e.g. English + Indonesian + Japanese)
 - AI-written meeting title, so Notion pages aren't all called "Meeting"
 - Bring your own free Groq API key; audio goes only to Groq, notes only where you choose

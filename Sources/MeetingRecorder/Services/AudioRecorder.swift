@@ -62,6 +62,21 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     private var loggedFirstBuffer: Set<String> = []
     private let fileFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
 
+    // MARK: Live chunks
+    /// Set before starting to get the recording in ~10-min WAV chunks as it happens,
+    /// so they can be transcribed/summarised in the background. Called on an audio
+    /// queue with (chunk file or nil if the last chunk is empty, index, isLast).
+    var onSegment: ((URL?, Int, Bool) -> Void)?
+    /// 10 minutes at 16 kHz. DEBUG: `defaults write com.ivanbayu.meetingrecorder
+    /// debugSegmentSeconds 30` makes short test recordings exercise the live path.
+    static var segmentFrames: Int {
+        let seconds = UserDefaults.standard.object(forKey: "debugSegmentSeconds") as? Int ?? 600
+        return 16_000 * max(10, seconds)
+    }
+    private var segmentFile: AVAudioFile?        // guarded by writeLock
+    private var segmentIndex = 0                 // guarded by writeLock
+    private var segmentFramesWritten = 0         // guarded by writeLock
+
     var outputURL_current: URL? { outputURL }
 
     /// Total PCM frames successfully written to the WAV since the last start.
@@ -80,6 +95,9 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         systemConverter = nil
         pendingSystem.removeAll()
         loggedFirstBuffer.removeAll()
+        segmentFile = nil
+        segmentIndex = 0
+        segmentFramesWritten = 0
         writeLock.unlock()
     }
 
@@ -437,6 +455,8 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         peakLevels.removeAll()
         sourceLevels.removeAll()
         audioFile = nil
+        if onSegment != nil { closeSegment(isLast: true) }
+        onSegment = nil
     }
 
     /// Caller holds `writeLock`.
@@ -459,6 +479,33 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         } catch {
             logger.error("Write error: \(error, privacy: .public)")
         }
+        if onSegment != nil { writeSegment(pcm) }
+    }
+
+    /// Mirrors every write into the current chunk file; rotates every 10 min.
+    /// Caller holds `writeLock`. A chunk failure never affects the main recording.
+    private func writeSegment(_ pcm: AVAudioPCMBuffer) {
+        do {
+            if segmentFile == nil, let outputURL {
+                let url = outputURL.deletingPathExtension().appendingPathExtension("part\(segmentIndex).wav")
+                segmentFile = try AVAudioFile(forWriting: url, settings: fileFormat.settings,
+                                              commonFormat: .pcmFormatInt16, interleaved: true)
+            }
+            try segmentFile?.write(from: pcm)
+            segmentFramesWritten += Int(pcm.frameLength)
+            if segmentFramesWritten >= Self.segmentFrames { closeSegment(isLast: false) }
+        } catch {
+            logger.error("Chunk write error: \(error, privacy: .public)")
+        }
+    }
+
+    /// Caller holds `writeLock`.
+    private func closeSegment(isLast: Bool) {
+        let url = segmentFile?.url
+        segmentFile = nil // releasing the AVAudioFile finalises the WAV header
+        onSegment?(url, segmentIndex, isLast)
+        segmentIndex += 1
+        segmentFramesWritten = 0
     }
 }
 

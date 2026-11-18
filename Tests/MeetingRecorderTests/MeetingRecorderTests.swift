@@ -4,6 +4,33 @@ import CryptoKit
 @testable import MeetingRecorder
 
 final class MeetingRecorderTests: XCTestCase {
+    /// Long transcripts must split into parts under the token budget without losing text.
+    func testTranscriptPartsRespectBudgetAndKeepAllText() {
+        func strip(_ s: String) -> String { s.filter { !$0.isWhitespace } }
+
+        XCTAssertEqual(GroqClient.transcriptParts("Short meeting. Done."), ["Short meeting. Done."])
+
+        // ~45 min of English (≈27k chars ≈ 6.8k tokens) → several parts.
+        let english = String(repeating: "We agreed to ship the beta on Friday and Sarah owns the release notes. ", count: 380)
+        let parts = GroqClient.transcriptParts(english, maxTokens: 3_000)
+        XCTAssertGreaterThan(parts.count, 2)
+        for part in parts { XCTAssertLessThanOrEqual(Double(part.utf8.count) / 4, 3_000) }
+        XCTAssertEqual(strip(parts.joined()), strip(english))
+
+        // Japanese counts ~1 token per character, so it splits much sooner.
+        let japanese = String(repeating: "来週の金曜日にベータ版を出すことに決めました。", count: 300) // 6,900 chars
+        let jaParts = GroqClient.transcriptParts(japanese, maxTokens: 3_000)
+        XCTAssertGreaterThanOrEqual(jaParts.count, 3)
+        for part in jaParts { XCTAssertLessThanOrEqual(part.count, 3_000) }
+        XCTAssertEqual(strip(jaParts.joined()), strip(japanese))
+
+        // A run-on transcript with no punctuation is still cut to size.
+        let runOn = String(repeating: "word ", count: 4_000) // 20k chars ≈ 5k tokens
+        let runParts = GroqClient.transcriptParts(runOn, maxTokens: 3_000)
+        XCTAssertEqual(runParts.count, 2)
+        XCTAssertEqual(strip(runParts.joined()), strip(runOn))
+    }
+
     /// PKCE S256 challenge must match RFC 7636 Appendix B, or Google rejects the sign-in.
     func testPKCEChallengeMatchesRFC7636() {
         let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
