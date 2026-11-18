@@ -78,7 +78,7 @@ struct NotionConnectView: View {
 
                 DisclosureGroup("How do I connect?", isExpanded: $showingTutorial) {
                     VStack(alignment: .leading, spacing: 6) {
-                        tutorialStep(1, "Settings & members → Connections → New (“MeetingRecorder”)")
+                        tutorialStep(1, "Settings & members → Connections → New (“Meeting Transcriber”)")
                         tutorialStep(2, "Enable Read, Update, and Insert capabilities")
                         tutorialStep(3, "Copy the integration secret")
                         tutorialStep(4, "Open the “Meeting Transcription” page → ⋯ → Connections → tick the integration")

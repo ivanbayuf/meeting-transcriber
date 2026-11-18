@@ -2,3 +2,6 @@
 .DS_Store
 .claude/
 dist/
+signing/
+ds-response.txt
+claude-batch2-result.json

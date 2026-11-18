@@ -1,14 +1,14 @@
-MeetingRecorder — quick start
-============================
+Meeting Transcriber — quick start
+================================
 
 1) INSTALL
-   Drag MeetingRecorder from the disk image into your Applications folder.
+   Drag Meeting Transcriber from the disk image into your Applications folder.
 
 2) FIRST OPEN (one time only)
-   macOS may show: "MeetingRecorder can't be opened because the developer
+   macOS may show: "Meeting Transcriber can't be opened because the developer
    can't be verified." This is normal for personal apps that aren't on the
    App Store — it does NOT mean your Mac is unsafe.
-     a. Right-click (or two-finger tap) MeetingRecorder in Applications
+     a. Right-click (or two-finger tap) Meeting Transcriber in Applications
      b. Choose "Open"
      c. Click "Open" again on the dialog
    From then on it opens normally.
@@ -21,7 +21,7 @@ MeetingRecorder — quick start
    If you turn one on, quit and re-open the app once.
 
    After installing a NEW version, macOS treats it as a different app:
-   in Screen & System Audio Recording, select MeetingRecorder, press "-"
+   in Screen & System Audio Recording, select Meeting Transcriber, press "-"
    to remove it, then press Record again and allow it. (Or run this in
    Terminal: tccutil reset ScreenCapture com.ivanbayu.meetingrecorder)
 
@@ -39,7 +39,7 @@ MeetingRecorder — quick start
       > "Connections" tab. (Older Notion versions call this "Integrations".)
 
    b. Click "Develop your own connections" (or "...integrations") > "+ New".
-      Name it "MeetingRecorder", pick your workspace, submit.
+      Name it "Meeting Transcriber", pick your workspace, submit.
 
    c. Open that connection and set its capabilities:
         READ content:    [x]
@@ -51,11 +51,11 @@ MeetingRecorder — quick start
 
    e. In Notion, create a page named "Meeting Transcription".
       On that page: click the ... menu > "Connections" > tick your
-      "MeetingRecorder" connection.
+      "Meeting Transcriber" connection.
 
    f. On the same page: ... menu > "Copy link".
 
-   g. In MeetingRecorder: Settings > Notion > paste the secret and the
+   g. In Meeting Transcriber: Settings > Notion > paste the secret and the
       page link > "Connect & Set Up". The app creates your "Meetings"
       database inside that page automatically. Done forever.
 

@@ -636,7 +636,7 @@ final class MeetingManager: ObservableObject {
         do {
             let box = try await fetchSCContentBox()
             availableWindows = box.windows.filter { !($0.title ?? "").isEmpty }
-            availableProcesses = box.apps.filter { !$0.applicationName.contains("MeetingRecorder") }
+            availableProcesses = box.apps.filter { $0.bundleIdentifier != Bundle.main.bundleIdentifier } // exclude ourselves by ID, not display name
         } catch {
             logger.error("Failed to get shareable content: \(error)")
         }

@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         button.image = MenuBarIcon.make()
         button.imagePosition = .imageOnly
-        button.toolTip = "MeetingRecorder"
+        button.toolTip = "Meeting Transcriber"
         button.action = #selector(statusItemClicked(_:))
         button.target = self
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -98,7 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(makeItem("Settings…", #selector(openSettings), key: ","))
         menu.addItem(.separator())
 
-        let quit = NSMenuItem(title: "Quit MeetingRecorder", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit Meeting Transcriber", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
 
@@ -175,7 +175,7 @@ final class SettingsWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "MeetingRecorder Settings"
+        window.title = "Meeting Transcriber Settings"
         window.contentView = host
         window.isReleasedWhenClosed = false
         // Regular level even though the app is .accessory, and follows the user
