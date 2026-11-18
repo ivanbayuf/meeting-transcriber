@@ -157,6 +157,34 @@ struct ClampedHeight: ViewModifier, Animatable {
     }
 }
 
+// MARK: - Per-element hover fill (item 34)
+
+/// Reusable hover-fill modifier used by the mic/record control, the chevron,
+/// and the collapsed-clock button. Renders an inset rounded-rect fill at
+/// 10% white opacity, fading in/out ~0.15s ease-out. Transform/opacity only
+/// (compositor-friendly). Harmless on non-hover-capable pointers.
+///
+/// Usage:
+///   someView.modifier(ElementHoverFill(isHovering: $hovering))
+struct ElementHoverFill: ViewModifier {
+    @Binding var isHovering: Bool
+    var cornerRadius: CGFloat = 10
+    var inset: CGFloat = 2
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.white.opacity(isHovering ? 0.10 : 0))
+                    .padding(inset)
+                    .allowsHitTesting(false)
+                    .animation(reduceMotion ? nil : IslandMotion.hoverFill, value: isHovering)
+            )
+            .onHover { isHovering = $0 }
+    }
+}
+
 // MARK: - State
 
 /// UI-only island state: expansion, page, hover timing, the success flash.
@@ -296,8 +324,10 @@ struct NotchIslandView: View {
     /// hidden to visible with a 0.1s step (staggeredReveal); on collapse they
     /// all exit fast without stagger.
     @State private var reveal = false
-    /// Item 32: hover feedback on the collapsed pill (no expand — item 21).
-    @State private var pillHovering = false
+    // item 34: per-element hover state (replaces pill-wide pillHovering — item 32 removed)
+    @State private var recordHovering = false
+    @State private var chevronHovering = false
+    @State private var clockHovering = false
 
     private struct LayoutKey: Equatable {
         var open: Bool
@@ -382,24 +412,15 @@ struct NotchIslandView: View {
         .background(Color.black)
         .clipShape(shape)
         .shadow(color: .black.opacity(open ? 0.45 : 0), radius: 18, x: 0, y: 10)
-        // Item 32: subtle hover feedback on the collapsed pill — inset
-        // rounded fill, 8% white, 0.15s fade. No expand on hover (item 21).
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.white.opacity(pillHovering && !open ? 0.08 : 0))
-                .padding(6)
-                .allowsHitTesting(false)
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: pillHovering)
-        }
+        // item 34: pill-wide overlay REMOVED — per-element hover fills are on
+        // RecordControlButton, chevron, and collapsedClock individually.
         .contentShape(shape)
-        // item 21: hover tracking for collapse-grace only; expand never triggered by hover.
+        // item 21 / 34: onContinuousHover feeds collapse-grace only; no expand, no pill fill.
         .onContinuousHover { phase in
             switch phase {
             case .active:
-                pillHovering = true
                 model.hoverChanged(true)
             case .ended:
-                pillHovering = false
                 model.hoverChanged(false)
             }
         }
@@ -448,7 +469,8 @@ struct NotchIslandView: View {
         switch content {
         case .outputs, .history: return IslandMetrics.maxBodyHeight
         case .processing: return 64
-        case .failure, .permission: return 108
+        // item 29: increased from 108 → 116 to give buttons 14pt bottom breathing room
+        case .failure, .permission: return 116
         case .success: return successHeight(model.flash)
         }
     }
@@ -468,17 +490,27 @@ struct NotchIslandView: View {
     /// Icon-only: record/stop on the left wing; chevron (or, while collapsed and
     /// recording, the live timer + blinking dot) on the right wing. On a notched
     /// screen the camera housing sits in the Spacer between the wings.
+    ///
+    /// Item 34: each interactive element gets its OWN inset rounded-rect hover fill
+    /// via ElementHoverFill (10% white, cornerRadius 10, inset 2pt, ~0.15s ease-out).
+    /// All three targets — record control, chevron, collapsed-clock — share the modifier.
     private func topRow(open: Bool, content: Pane, recording: Bool) -> some View {
         HStack(spacing: 0) {
+            // item 34: per-element hover fill on the record control
             recordControl(open: open)
+                .modifier(ElementHoverFill(isHovering: $recordHovering))
             Spacer(minLength: 0)
             ZStack(alignment: .trailing) {
                 if recording && !open {
                     // Collapsed + recording: blinking dot + timer (items 22, 24)
+                    // item 34: per-element hover fill on the collapsed clock button
                     collapsedClock
+                        .modifier(ElementHoverFill(isHovering: $clockHovering))
                         .transition(.opacity)
                 } else {
+                    // item 34: per-element hover fill on the chevron button
                     chevron(open: open, content: content)
+                        .modifier(ElementHoverFill(isHovering: $chevronHovering))
                         .transition(.opacity)
                 }
             }
@@ -624,15 +656,16 @@ struct NotchIslandView: View {
     }
 
     /// Setup first: an unconfigured row shows its setup action; Markdown keeps
-    /// a "Change…" action once a folder is chosen. No key-entry microcopy here —
-    /// Notion setup happens in Settings.
+    /// a "Directory" action once a folder is chosen (item 33: no ellipsis in copy).
+    /// No key-entry microcopy here — Notion setup happens in Settings.
     private func accessory(for destination: OutputDestination) -> DestinationRow.Accessory? {
         switch destination {
         case .notion:
             guard !manager.notionConfigured else { return nil }
             return DestinationRow.Accessory(title: "Connect Notion…") { model.onOpenSettings(.notion) }
         case .markdown:
-            return DestinationRow.Accessory(title: manager.markdownConfigured ? "Change…" : "Choose folder…") {
+            // item 33: "Change…" → "Directory" (no ellipsis in copy once configured)
+            return DestinationRow.Accessory(title: manager.markdownConfigured ? "Directory" : "Choose folder…") {
                 chooseMarkdownFolder()
             }
         case .clipboard:
@@ -829,10 +862,11 @@ struct NotchIslandView: View {
             }
         }
         // item 26: 15pt horizontal padding — text cards get a bit more room than the 12pt default
+        // item 29: 14pt bottom padding — matches the left/right 12-15pt rhythm
         .padding(.horizontal, 15)
         .padding(.top, 6)
-        .padding(.bottom, 12)
-        .frame(width: metrics.expandedWidth, height: 108, alignment: .topLeading)
+        .padding(.bottom, 14)
+        .frame(width: metrics.expandedWidth, height: 116, alignment: .topLeading)
     }
 
     /// Shown instead of re-prompting: the user grants access in System Settings.
@@ -867,10 +901,12 @@ struct NotchIslandView: View {
                 .buttonStyle(PillButtonStyle(prominent: true))
             }
         }
+        // item 29: 14pt bottom padding — matches the left/right 12pt rhythm so buttons don't
+        // crowd the bottom edge.
         .padding(.horizontal, IslandMetrics.horizontalPadding)
         .padding(.top, 6)
-        .padding(.bottom, 12)
-        .frame(width: metrics.expandedWidth, height: 108, alignment: .topLeading)
+        .padding(.bottom, 14)
+        .frame(width: metrics.expandedWidth, height: 116, alignment: .topLeading)
     }
 
     // MARK: Actions
@@ -977,7 +1013,7 @@ struct GroqOnboardingCard: View {
 
 /// The record/stop control in the top-left wing.
 /// Item 19: NO red circle background. Glyph is RED while recording, WHITE while idle.
-/// Item 25: Rounded-rect hover fill (7% white, ~0.15s fade, inset from pill edges).
+/// Item 25/34: Hover fill is applied by ElementHoverFill in the parent topRow.
 /// Item 13: Disabled (greyed) when groqKeyValid is false.
 struct RecordControlButton: View {
     var isRecording: Bool
@@ -986,18 +1022,9 @@ struct RecordControlButton: View {
     var groqKeyValid: Bool
     var action: () -> Void
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isHovering = false
-
     var body: some View {
         Button(action: action) {
             ZStack {
-                // item 25: hover fill — rounded rect inset 2pt from edges, 7% white, ~0.15s ease-out
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.white.opacity(isHovering ? 0.10 : 0))
-                    .padding(2)
-                    .animation(reduceMotion ? nil : IslandMotion.hoverFill, value: isHovering)
-
                 if isProcessing {
                     ProgressView()
                         .controlSize(.mini)
@@ -1015,7 +1042,6 @@ struct RecordControlButton: View {
         .disabled(isProcessing || !groqKeyValid)
         .help(isRecording ? "Stop recording" : (groqKeyValid ? "Start recording" : "Add a Groq API key to record"))
         .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
-        .onHover { isHovering = $0 }
     }
 }
 
@@ -1218,7 +1244,10 @@ struct DestinationRow: View {
             .accessibilityAddTraits(isSelected ? .isSelected : [])
 
             if let accessory {
+                // item 33: accessory label must never truncate — fixedSize lets
+                // the button take as much width as its text needs.
                 Button(accessory.title, action: accessory.action)
+                    .fixedSize(horizontal: true, vertical: false)
                     .buttonStyle(PillButtonStyle(compact: true))
             }
         }

@@ -66,11 +66,6 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Notion") {
-                NotionConnectView()
-            }
-            .id(SettingsSection.notion)
-
             Section {
                 ForEach(OutputDestination.allCases) { destination in
                     SettingsDestinationRow(destination: destination)
@@ -125,7 +120,11 @@ struct SettingsView: View {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(60))
             withAnimation(.timingCurve(0.23, 1, 0.32, 1, duration: 0.25)) {
-                proxy.scrollTo(section, anchor: .top)
+                if section == .notion {
+                    proxy.scrollTo(SettingsSection.notion.rawValue, anchor: .top)
+                } else {
+                    proxy.scrollTo(section, anchor: .top)
+                }
             }
             manager.settingsFocus = nil
         }
@@ -137,6 +136,7 @@ struct SettingsView: View {
 /// that isn't set up shows its setup action instead of being selectable.
 private struct SettingsDestinationRow: View {
     @EnvironmentObject var manager: MeetingManager
+    @State private var showingNotionConnect = false
     let destination: OutputDestination
 
     private var isReady: Bool { manager.isReady(destination) }
@@ -144,7 +144,13 @@ private struct SettingsDestinationRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Button { manager.select(destination) } label: {
+            Button {
+                if destination == .notion && !manager.notionConnected {
+                    showingNotionConnect = true
+                } else {
+                    manager.select(destination)
+                }
+            } label: {
                 HStack(spacing: 10) {
                     Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
@@ -167,17 +173,32 @@ private struct SettingsDestinationRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(!isReady)
-            .opacity(isReady ? 1 : 0.5)
+            .disabled(!isReady && destination != .notion)
+            .opacity(isReady || destination == .notion ? 1 : 0.5)
             .accessibilityAddTraits(isSelected ? .isSelected : [])
 
             trailingAction
+        }
+        .id(destination == .notion ? SettingsSection.notion.rawValue : destination.rawValue)
+        .onAppear {
+            if manager.settingsFocus == .notion { showingNotionConnect = true }
+        }
+        .onChange(of: manager.settingsFocus) { _, section in
+            if section == .notion { showingNotionConnect = true }
+        }
+        .onChange(of: manager.notionConnected) { _, connected in
+            if connected { showingNotionConnect = false }
+        }
+        if destination == .notion && showingNotionConnect && !manager.notionConnected {
+            NotionConnectView()
+                .padding(.leading, 28)
+                .padding(.top, 4)
         }
     }
 
     private var caption: String? {
         switch destination {
-        case .notion: return isReady ? "Meetings database" : nil
+        case .notion: return isReady ? "Connected — Meetings database" : nil
         case .markdown: return isReady ? "Folder: \(manager.markdownFolderName)" : nil
         case .clipboard: return nil
         }
@@ -186,8 +207,11 @@ private struct SettingsDestinationRow: View {
     @ViewBuilder
     private var trailingAction: some View {
         switch destination {
+        case .notion where isReady:
+            Button("Disconnect", role: .destructive) { manager.disconnectNotion() }
+                .controlSize(.small)
         case .notion where !isReady:
-            Button("Connect Notion…") { manager.settingsFocus = .notion }
+            Button("Connect Notion…") { showingNotionConnect = true }
                 .controlSize(.small)
         case .markdown:
             Button(isReady ? "Change…" : "Choose folder…") { manager.chooseMarkdownFolder() }

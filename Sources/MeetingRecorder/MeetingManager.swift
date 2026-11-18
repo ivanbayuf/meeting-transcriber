@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import CoreGraphics
 import ScreenCaptureKit
 import os.log
 
@@ -57,9 +58,6 @@ final class MeetingManager: ObservableObject {
     @AppStorage("autoShowIsland") var autoShowIsland: Bool = true {
         willSet { objectWillChange.send() }
     }
-    /// Set once the ScreenCaptureKit prompt has been triggered. After that, a
-    /// missing grant shows the in-app card instead of calling SCK again.
-    @AppStorage("screenCapturePrompted") private var screenCapturePrompted: Bool = false
 
     var notionConfigured: Bool {
         !notionToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
@@ -236,13 +234,8 @@ final class MeetingManager: ObservableObject {
     func dismissPermissionCard() { permissionNeeded = false }
 
     func openScreenCapturePrivacySettings() {
-        let paneURLs = [
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-            "x-apple.system-settings:com.apple.settings.PrivacySecurity",
-        ]
-        for string in paneURLs {
-            if let url = URL(string: string), NSWorkspace.shared.open(url) { return }
-        }
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+        NSWorkspace.shared.open(url)
     }
 
     @Published var currentMeeting: Meeting?
@@ -388,15 +381,13 @@ final class MeetingManager: ObservableObject {
     }
 
     /// The display to capture, or nil when Screen & System Audio permission is
-    /// missing. ScreenCaptureKit is called at most once in an ungranted state:
-    /// the first press may show the system prompt; after that a failed
-    /// (non-prompting) preflight goes straight to the in-app card.
+    /// missing. Re-request only on a Record press so a reset TCC grant is
+    /// logged again and the user can enable the app in System Settings.
     private func displayForRecording() async -> SCDisplay? {
         if let pendingDisplay { return pendingDisplay }
-        if screenCapturePrompted && !CGPreflightScreenCaptureAccess() {
-            return nil
+        if !CGPreflightScreenCaptureAccess() {
+            guard CGRequestScreenCaptureAccess() else { return nil }
         }
-        screenCapturePrompted = true
         do {
             pendingDisplay = try await fetchSCContentBox().displays.first
         } catch {
