@@ -103,16 +103,18 @@ struct IslandShape: Shape {
 // MARK: - Motion tokens
 
 enum IslandMotion {
-    /// Pill ↔ card (click — interactive, so a spring). Emil-style duration/bounce
-    /// spring: duration 0.4s, bounce 0.15 (his "Apple-style, easy to reason about"
-    /// — interruptible/reversible, small overshoot only).
-    /// DEBUG overrides: `defaults write com.ivanbayu.meetingrecorder
-    /// debugSpringDuration 0.5` and `debugSpringBounce 0.2` (both read live, no
-    /// rebuild; absent keys = the defaults above).
-    static var morph: Animation {
-        let duration = UserDefaults.standard.object(forKey: "debugSpringDuration") as? Double ?? 0.4
-        let bounce = UserDefaults.standard.object(forKey: "debugSpringBounce") as? Double ?? 0.15
-        return Animation.spring(duration: duration, bounce: bounce)
+    /// Enter (expand): Emil's strong ease-out — cubic-bezier(0.23, 1, 0.32, 1),
+    /// drawer-tier 300ms. DEBUG: `defaults write com.ivanbayu.meetingrecorder
+    /// debugExpandDuration 0.4` (seconds, read live).
+    static var expand: Animation {
+        let d = UserDefaults.standard.object(forKey: "debugExpandDuration") as? Double ?? 0.3
+        return .timingCurve(0.23, 1, 0.32, 1, duration: d)
+    }
+    /// Exit (collapse): same curve, shorter — the user already decided to leave.
+    /// DEBUG: `defaults write com.ivanbayu.meetingrecorder debugCollapseDuration 0.15`.
+    static var collapse: Animation {
+        let d = UserDefaults.standard.object(forKey: "debugCollapseDuration") as? Double ?? 0.18
+        return .timingCurve(0.23, 1, 0.32, 1, duration: d)
     }
     /// Record button mic ↔ stop swap: a binary state change, so a short
     /// scale+opacity crossfade on a slightly faster spring (~0.2s) with a
@@ -319,10 +321,10 @@ struct NotchIslandView: View {
             .ignoresSafeArea()
             .environment(\.colorScheme, .dark)
             .environmentObject(manager)
-            // One spring drives every layout change, whatever caused it (hover,
-            // chevron, pipeline, recording start/stop). Reduce Motion: the shape
-            // snaps (no spring, no movement); content still crossfades.
-            .animation(reduceMotion ? nil : IslandMotion.morph,
+            // One easing drives every layout change: Emil's strong ease-out,
+        // longer on enter (expand), shorter on exit (collapse). Reduce Motion:
+        // the shape snaps (no movement); content still crossfades.
+            .animation(reduceMotion ? nil : (open ? IslandMotion.expand : IslandMotion.collapse),
                        value: LayoutKey(open: open, pane: content, recording: recording))
             .onReceive(manager.$lastReport.compactMap { $0 }.removeDuplicates()) { report in
                 model.presentSuccess(report)
