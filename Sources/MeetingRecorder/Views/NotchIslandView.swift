@@ -292,6 +292,13 @@ struct NotchIslandView: View {
     /// What the card body shows. (Not "Body" — that name is View's associated type.)
     enum Pane: Hashable { case outputs, history, processing, success, failure, permission }
 
+    /// One-by-one content reveal: when the card expands, elements flip from
+    /// hidden to visible with a 0.1s step (staggeredReveal); on collapse they
+    /// all exit fast without stagger.
+    @State private var reveal = false
+    /// Item 32: hover feedback on the collapsed pill (no expand — item 21).
+    @State private var pillHovering = false
+
     private struct LayoutKey: Equatable {
         var open: Bool
         var pane: Pane
@@ -332,6 +339,14 @@ struct NotchIslandView: View {
             .onReceive(manager.$lastReport.compactMap { $0 }.removeDuplicates()) { report in
                 model.presentSuccess(report)
             }
+            // One-by-one reveal: on open (or page switch) reset and re-run the
+            // stagger; on close everything just fades out fast (no stagger).
+            .onChange(of: model.isExpanded) { _, open in
+                restartReveal(open: open)
+            }
+            .onChange(of: model.page) { _, _ in
+                restartReveal(open: model.isExpanded)
+            }
     }
 
     // MARK: Card
@@ -367,41 +382,65 @@ struct NotchIslandView: View {
         .background(Color.black)
         .clipShape(shape)
         .shadow(color: .black.opacity(open ? 0.45 : 0), radius: 18, x: 0, y: 10)
+        // Item 32: subtle hover feedback on the collapsed pill — inset
+        // rounded fill, 8% white, 0.15s fade. No expand on hover (item 21).
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(pillHovering && !open ? 0.08 : 0))
+                .padding(6)
+                .allowsHitTesting(false)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: pillHovering)
+        }
         .contentShape(shape)
         // item 21: hover tracking for collapse-grace only; expand never triggered by hover.
         .onContinuousHover { phase in
             switch phase {
-            case .active: model.hoverChanged(true)
-            case .ended: model.hoverChanged(false)
+            case .active:
+                pillHovering = true
+                model.hoverChanged(true)
+            case .ended:
+                pillHovering = false
+                model.hoverChanged(false)
             }
         }
     }
 
     private var contentTransition: AnyTransition {
-        // The card content settles INTO the opening card: fade + a small
-        // upward slide, delayed so the body waits for the card to be ~⅓ open
-        // (Emil: content never spills past a moving edge). Reduce Motion:
-        // opacity only — no slide.
+        // Whole-page fade only — the one-by-one reveal of the inner elements
+        // is handled per-row by StaggerReveal below. No delay here: a delayed
+        // whole page would double up with the row stagger.
         .asymmetric(
-            insertion: .modifier(
-                active: ContentReveal(offsetY: reduceMotion ? 0 : 6, opacity: 0),
-                identity: ContentReveal(offsetY: 0, opacity: 1)
-            ).animation(
-                reduceMotion ? IslandMotion.contentIn : IslandMotion.contentIn.delay(IslandMotion.contentInDelay)
-            ),
+            insertion: .opacity.animation(IslandMotion.contentIn),
             removal: .opacity.animation(IslandMotion.contentOut)
         )
     }
 
-    /// Transform/opacity-only content reveal (the slide is an `offset`, never
-    /// layout). `offsetY` is 0 when Reduce Motion is on.
-    private struct ContentReveal: ViewModifier {
-        var offsetY: CGFloat
-        var opacity: Double
+    private func restartReveal(open: Bool) {
+        reveal = false
+        guard open else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            reveal = true
+        }
+    }
+
+    /// One-by-one reveal (Ivan's 2026-11-18 request): on expand, each element
+    /// fades + slides up 6pt IN ORDER with a 0.1s step. On collapse everything
+    /// exits fast without stagger. Reduce Motion: opacity only, no slide.
+    private struct StaggerReveal: ViewModifier {
+        var index: Int
+        var active: Bool
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
         func body(content: Content) -> some View {
             content
-                .opacity(opacity)
-                .offset(y: offsetY)
+                .opacity(active ? 1 : 0)
+                .offset(y: active || reduceMotion ? 0 : 6)
+                .animation(
+                    reduceMotion ? .easeOut(duration: 0.1)
+                    : .easeOut(duration: 0.18).delay(active ? 0.05 + Double(index) * 0.1 : 0),
+                    value: active
+                )
         }
     }
 
@@ -535,6 +574,7 @@ struct NotchIslandView: View {
             // item 13 island side: Groq onboarding card shown when key is missing/unverified
             if !groqKeyValid {
                 GroqOnboardingCard(manager: manager)
+                    .modifier(StaggerReveal(index: 0, active: reveal))
                     .padding(.horizontal, 4)
                     .padding(.top, 4)
                     .padding(.bottom, 6)
@@ -546,10 +586,11 @@ struct NotchIslandView: View {
                 .foregroundStyle(Color.white.opacity(0.45))
                 .frame(height: 16)
                 .padding(.horizontal, 8)
+                .modifier(StaggerReveal(index: 1, active: reveal))
 
             // item 27: roomier row spacing in the send-notes section
             VStack(spacing: 4) {
-                ForEach(OutputDestination.allCases) { destination in
+                ForEach(Array(OutputDestination.allCases.enumerated()), id: \.element) { offset, destination in
                     DestinationRow(
                         icon: destination.systemImage,
                         title: destination.title,
@@ -559,12 +600,14 @@ struct NotchIslandView: View {
                         select: { manager.select(destination) },
                         accessory: accessory(for: destination)
                     )
+                    .modifier(StaggerReveal(index: 2 + offset, active: reveal))
                 }
             }
             .padding(.top, 4)
 
             Spacer(minLength: 6)
             bottomBar
+                .modifier(StaggerReveal(index: 5, active: reveal))
         }
         // item 27: 4 outer + 8 row inset = 12pt text inset, matching the top row.
         .padding(.horizontal, 4)
@@ -673,8 +716,10 @@ struct NotchIslandView: View {
                     .foregroundStyle(Color.white.opacity(0.45))
             }
             .padding(.horizontal, 8)
+            .modifier(StaggerReveal(index: 0, active: reveal))
 
             HistoryView()
+                .modifier(StaggerReveal(index: 1, active: reveal))
         }
         .padding(.horizontal, 4)
         .padding(.top, 2)
@@ -949,7 +994,7 @@ struct RecordControlButton: View {
             ZStack {
                 // item 25: hover fill — rounded rect inset 2pt from edges, 7% white, ~0.15s ease-out
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.white.opacity(isHovering ? 0.07 : 0))
+                    .fill(Color.white.opacity(isHovering ? 0.10 : 0))
                     .padding(2)
                     .animation(reduceMotion ? nil : IslandMotion.hoverFill, value: isHovering)
 
@@ -1183,7 +1228,7 @@ struct DestinationRow: View {
         // Hover tint is instant: rows are scanned many times a day.
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.white.opacity(hovering && isReady ? 0.07 : 0))
+                .fill(Color.white.opacity(hovering && isReady ? 0.10 : 0))
         )
         .onHover { hovering = $0 }
     }
