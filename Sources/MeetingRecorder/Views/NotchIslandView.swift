@@ -1,3 +1,4 @@
+// ORCHESTRATOR-GLUE: needs manager.verifyGroqKey() async -> Bool, manager.groqKeyState: GroqKeyState (enum idle/valid/error(String)), manager.audioRecorder.micLevel: Float, manager.audioRecorder.totalFrames: Int, manager.micPermissionNeeded: Bool
 import SwiftUI
 import AppKit
 import Combine
@@ -18,9 +19,9 @@ struct IslandMetrics: Equatable {
     static let shadowInset: CGFloat = 32
     /// Tallest body below the top row (outputs/history pages).
     static let maxBodyHeight: CGFloat = 172
-    /// Expanded card width. Kept ≈300 so the card stays clear of the app's
-    /// "Window"/"Help" menus on a 14" display. Tune here.
-    static let baseExpandedWidth: CGFloat = 300
+    /// Expanded card width. Widened to 330 (item 27) so the "Send notes" section
+    /// has room. Still clears "Window"/"Help" menus on a 14" display. Tune here.
+    static let baseExpandedWidth: CGFloat = 330
     /// Collapsed = icon-only. Each wing holds one 24pt control (record left,
     /// chevron right) → 80pt total without a notch. On a notched screen the
     /// wings sit either side of the camera housing (nothing can draw under it).
@@ -119,8 +120,12 @@ enum IslandMotion {
     static let press = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.10)
     /// Reduce Motion fallback: opacity only, no spring.
     static let reducedFade = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.15)
-    /// The only continuous animation in the app.
+    /// The only continuous animation in the app — record button pulse.
     static let pulse = Animation.easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+    /// Hover fill fade: ~0.15s ease-out (item 25, transform/opacity only).
+    static let hoverFill = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.15)
+    /// Blinking dot: ~1s steady cadence with autoreversal (item 24).
+    static let blink = Animation.easeInOut(duration: 0.5).repeatForever(autoreverses: true)
 }
 
 /// Height driven by the morph spring. The overshoot on collapse would
@@ -163,10 +168,11 @@ final class IslandModel: ObservableObject {
     private var holdCount = 0
     /// True during the flash's minimum on-screen time.
     private var flashHolding = false
+    // hoverTask still used for collapse-grace scheduling; no longer used to expand (item 21).
     private var hoverTask: Task<Void, Never>?
     private var flashTask: Task<Void, Never>?
 
-    static let hoverOpenDelay: Duration = .milliseconds(300)
+    // item 21: hover-to-expand REMOVED. Only explicit click expands the island.
     static let hoverCloseGrace: Duration = .milliseconds(600)
     /// Opened from the menu bar while the pointer is elsewhere: close on its own.
     static let unattendedLinger: Duration = .seconds(4)
@@ -176,26 +182,20 @@ final class IslandModel: ObservableObject {
         self.metrics = metrics
     }
 
-    // Hover: 300ms intent delay to open, 600ms grace to close. Only edges
-    // (enter/leave) act, so continuous pointer movement doesn't restart timers,
-    // and an explicit chevron-collapse isn't undone while the pointer rests.
+    // item 21: hover tracking is kept ONLY for collapse-grace and flash-hold
+    // checks. We no longer expand on hover — only on explicit click/tap.
     func hoverChanged(_ hovering: Bool) {
         guard hovering != isHovering else { return }
         isHovering = hovering
         hoverTask?.cancel()
-        if hovering {
-            guard !isExpanded else { return }
-            hoverTask = Task { [weak self] in
-                try? await Task.sleep(for: Self.hoverOpenDelay)
-                guard !Task.isCancelled, let self, self.isHovering else { return }
-                self.setExpanded(true)
-            }
-        } else {
+        if !hovering {
+            // Grace window: if the pointer left while expanded, schedule collapse.
             scheduleCollapse(after: Self.hoverCloseGrace)
         }
+        // On hover-enter we do NOT start any expand task (item 21).
     }
 
-    /// Chevron / status-item click: instant, no delays.
+    /// Chevron / status-item click: instant, no delays. Only way to expand.
     func toggleExpanded() {
         if isExpanded || flash != nil {
             collapseNow()
@@ -351,6 +351,7 @@ struct NotchIslandView: View {
         .clipShape(shape)
         .shadow(color: .black.opacity(open ? 0.45 : 0), radius: 18, x: 0, y: 10)
         .contentShape(shape)
+        // item 21: hover tracking for collapse-grace only; expand never triggered by hover.
         .onContinuousHover { phase in
             switch phase {
             case .active: model.hoverChanged(true)
@@ -390,14 +391,15 @@ struct NotchIslandView: View {
     // MARK: Top row
 
     /// Icon-only: record/stop on the left wing; chevron (or, while collapsed and
-    /// recording, the live timer) on the right wing. On a notched screen the
-    /// camera housing sits in the Spacer between the wings.
+    /// recording, the live timer + blinking dot) on the right wing. On a notched
+    /// screen the camera housing sits in the Spacer between the wings.
     private func topRow(open: Bool, content: Pane, recording: Bool) -> some View {
         HStack(spacing: 0) {
             recordControl(open: open)
             Spacer(minLength: 0)
             ZStack(alignment: .trailing) {
                 if recording && !open {
+                    // Collapsed + recording: blinking dot + timer (items 22, 24)
                     collapsedClock
                         .transition(.opacity)
                 } else {
@@ -409,46 +411,50 @@ struct NotchIslandView: View {
         .padding(.horizontal, open ? IslandMetrics.horizontalPadding : IslandMetrics.wingPadding)
     }
 
+    // MARK: Record control (items 19 + 25)
+
     private func recordControl(open: Bool) -> some View {
-        Button { toggleRecording() } label: {
-            ZStack {
-                if manager.isProcessing {
-                    ProgressView()
-                        .controlSize(.mini)
-                } else {
-                    // ONE face whose glyph morphs mic ↔ stop (same identity, so
-                    // the swap animates instead of being a view replacement).
-                    // While open, the bottom bar's Stop button carries the pulse —
-                    // one pulse on screen at a time.
-                    RecordFace(kind: manager.isRecording ? .stop : .mic,
-                               pulses: manager.isRecording && !open)
-                }
-            }
-            .frame(width: 24, height: 24)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressScaleStyle())
-        .disabled(manager.isProcessing)
-        .help(manager.isRecording ? "Stop recording" : "Start recording")
-        .accessibilityLabel(manager.isRecording ? "Stop recording" : "Start recording")
+        RecordControlButton(
+            isRecording: manager.isRecording,
+            isProcessing: manager.isProcessing,
+            isOpen: open,
+            groqKeyValid: groqKeyValid,
+            action: { toggleRecording() }
+        )
     }
 
-    /// Live timer in the collapsed right wing; clicking it opens the card.
+    /// True when the Groq key is present and verified (item 13 island side).
+    /// ORCHESTRATOR-GLUE: manager.groqKeyState must conform to GroqKeyState pattern-matched below.
+    private var groqKeyValid: Bool {
+        if case .valid = manager.groqKeyState { return true }
+        return false
+    }
+
+    /// Live timer + blinking dot in the collapsed right wing (items 22, 24).
+    /// Clicking the timer opens the card.
     @ViewBuilder
     private var collapsedClock: some View {
         if let start = manager.recordingStartedAt {
-            Button { model.toggleExpanded() } label: {
-                RecordingClock(start: start)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.9))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                    .frame(height: 24)
-                    .contentShape(Rectangle())
+            HStack(spacing: 5) {
+                // item 24: blinking red dot, steady ~1s cadence
+                BlinkingDot()
+
+                Button { model.toggleExpanded() } label: {
+                    RecordingClock(start: start)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        // item 22: balance right padding to 12pt rhythm (wingPadding on each side)
+                        .padding(.leading, 2)
+                        .padding(.trailing, IslandMetrics.wingPadding)
+                        .frame(height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Expand")
+                .accessibilityLabel("Recording time")
             }
-            .buttonStyle(.plain)
-            .help("Expand")
-            .accessibilityLabel("Recording time")
         }
     }
 
@@ -482,8 +488,18 @@ struct NotchIslandView: View {
         }
     }
 
+    // MARK: Outputs page (items 13 island, 27)
+
     private var outputsPage: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // item 13 island side: Groq onboarding card shown when key is missing/unverified
+            if !groqKeyValid {
+                GroqOnboardingCard(manager: manager)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 4)
+                    .padding(.bottom, 6)
+            }
+
             Text("SEND NOTES TO")
                 .font(.system(size: 10, weight: .semibold))
                 .tracking(0.6)
@@ -491,7 +507,8 @@ struct NotchIslandView: View {
                 .frame(height: 16)
                 .padding(.horizontal, 8)
 
-            VStack(spacing: 2) {
+            // item 27: roomier row spacing in the send-notes section
+            VStack(spacing: 4) {
                 ForEach(OutputDestination.allCases) { destination in
                     DestinationRow(
                         icon: destination.systemImage,
@@ -504,14 +521,14 @@ struct NotchIslandView: View {
                     )
                 }
             }
-            .padding(.top, 2)
+            .padding(.top, 4)
 
             Spacer(minLength: 6)
             bottomBar
         }
-        // 4 outer + 8 row inset = 12pt text inset, matching the top row.
+        // item 27: 4 outer + 8 row inset = 12pt text inset, matching the top row.
         .padding(.horizontal, 4)
-        .padding(.top, 2)
+        .padding(.top, 4)
         .padding(.bottom, 10)
         .frame(width: metrics.expandedWidth, height: IslandMetrics.maxBodyHeight, alignment: .top)
     }
@@ -563,6 +580,10 @@ struct NotchIslandView: View {
                 }
                 .buttonStyle(PressScaleStyle())
                 .accessibilityLabel("Stop recording")
+
+                // item 20 island: mic level meter, hidden when not recording
+                MicLevelBar(level: manager.audioRecorder.micLevel)
+                    .transition(.opacity.animation(IslandMotion.contentIn))
 
                 Spacer(minLength: 0)
                 if !manager.meetingHistory.isEmpty {
@@ -692,6 +713,8 @@ struct NotchIslandView: View {
         .frame(width: metrics.expandedWidth, height: successHeight(report), alignment: .topLeading)
     }
 
+    // MARK: Failure page (item 26: wider horizontal padding ~15pt)
+
     private var failurePage: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 8) {
@@ -720,7 +743,8 @@ struct NotchIslandView: View {
                 }
             }
         }
-        .padding(.horizontal, IslandMetrics.horizontalPadding)
+        // item 26: 15pt horizontal padding — text cards get a bit more room than the 12pt default
+        .padding(.horizontal, 15)
         .padding(.top, 6)
         .padding(.bottom, 12)
         .frame(width: metrics.expandedWidth, height: 108, alignment: .topLeading)
@@ -782,12 +806,141 @@ struct NotchIslandView: View {
     }
 }
 
+// MARK: - Groq onboarding card (item 13 — island side)
+
+/// Shown at the top of the outputs page when groqAPIKey is empty or the key
+/// state is idle/error. The record control is disabled while this is showing.
+struct GroqOnboardingCard: View {
+    @ObservedObject var manager: MeetingManager
+    // ORCHESTRATOR-GLUE: manager.groqKeyState: GroqKeyState, manager.verifyGroqKey() async -> Bool
+
+    @AppStorage("groqAPIKey", store: UserDefaults(suiteName: "com.ivanbayu.meetingrecorder"))
+    private var groqAPIKey: String = ""
+
+    @State private var isVerifying = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Add your Groq API key")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.7))
+
+            SecureField("sk-…", text: $groqAPIKey)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Color.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                )
+
+            HStack(spacing: 8) {
+                Button {
+                    isVerifying = true
+                    Task {
+                        _ = await manager.verifyGroqKey()
+                        isVerifying = false
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        if isVerifying {
+                            ProgressView().controlSize(.mini)
+                        }
+                        Text("Save & Verify")
+                    }
+                }
+                .buttonStyle(PillButtonStyle(prominent: true, compact: true))
+                .disabled(groqAPIKey.isEmpty || isVerifying)
+
+                // Inline status chip: ✓ green / ✗ error line
+                groqKeyStatusView
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5)
+                )
+        )
+    }
+
+    @ViewBuilder
+    private var groqKeyStatusView: some View {
+        switch manager.groqKeyState {
+        case .valid:
+            Label("Valid", systemImage: "checkmark.circle.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.green)
+        case .error(let msg):
+            Text(msg)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.red)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        case .idle:
+            EmptyView()
+        }
+    }
+}
+
+// MARK: - Record control button (items 19 + 25)
+
+/// The record/stop control in the top-left wing.
+/// Item 19: NO red circle background. Glyph is RED while recording, WHITE while idle.
+/// Item 25: Rounded-rect hover fill (7% white, ~0.15s fade, inset from pill edges).
+/// Item 13: Disabled (greyed) when groqKeyValid is false.
+struct RecordControlButton: View {
+    var isRecording: Bool
+    var isProcessing: Bool
+    var isOpen: Bool
+    var groqKeyValid: Bool
+    var action: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                // item 25: hover fill — rounded rect inset 2pt from edges, 7% white, ~0.15s ease-out
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.white.opacity(isHovering ? 0.07 : 0))
+                    .padding(2)
+                    .animation(reduceMotion ? nil : IslandMotion.hoverFill, value: isHovering)
+
+                if isProcessing {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    // item 19: no circle, glyph color carries the state
+                    RecordFace(kind: isRecording ? .stop : .mic,
+                               pulses: isRecording && !isOpen)
+                }
+            }
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressScaleStyle())
+        // item 13 island: disable while Groq key missing/invalid; also while processing
+        .disabled(isProcessing || !groqKeyValid)
+        .help(isRecording ? "Stop recording" : (groqKeyValid ? "Start recording" : "Add a Groq API key to record"))
+        .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
+        .onHover { isHovering = $0 }
+    }
+}
+
 // MARK: - Components
 
-/// Red record button face. The glyph morphs mic → stop (and back) as a
-/// scale + opacity crossfade on `IslandMotion.glyphSwap` (~0.2s, one small
-/// overshoot). Both glyphs stay mounted so the swap is interruptible: a quick
-/// re-tap retargets from wherever the spring is. Reduce Motion: opacity only.
+/// Record button face. Item 19: NO red circle background — glyph color carries
+/// the semantic (red = recording/stop, white = idle/mic). The glyph morphs
+/// mic → stop (and back) as a scale + opacity crossfade on `IslandMotion.glyphSwap`
+/// (~0.2s, one small overshoot). Both glyphs stay mounted so the swap is
+/// interruptible. Reduce Motion: opacity only.
 struct RecordFace: View {
     enum Kind: Equatable { case mic, stop }
     var kind: Kind
@@ -800,12 +953,14 @@ struct RecordFace: View {
         let isStop = kind == .stop
         // Outgoing glyph shrinks toward 0.5 (never 0) while fading.
         let hiddenScale: CGFloat = reduceMotion ? 1 : 0.5
+        // item 19: glyph is red when showing the stop square; white for mic.
+        let glyphColor: Color = isStop ? .red : .white
 
         ZStack {
-            Circle().fill(Color.red)
+            // item 19: Circle().fill(Color.red) REMOVED — no background circle.
             ZStack {
                 Image(systemName: "mic.fill")
-                    .font(.system(size: diameter * 0.5, weight: .semibold))
+                    .font(.system(size: diameter * 0.6, weight: .semibold))
                     .scaleEffect(isStop ? hiddenScale : 1)
                     .opacity(isStop ? 0 : 1)
                 RoundedRectangle(cornerRadius: diameter * 0.1, style: .continuous)
@@ -815,7 +970,8 @@ struct RecordFace: View {
             }
             .animation(reduceMotion ? IslandMotion.reducedFade : IslandMotion.glyphSwap, value: kind)
         }
-        .foregroundStyle(Color.white)
+        .foregroundStyle(glyphColor)
+        .animation(reduceMotion ? IslandMotion.reducedFade : IslandMotion.glyphSwap, value: isStop)
         .frame(width: diameter, height: diameter)
         .modifier(PulseEffect(active: pulses))
         .accessibilityHidden(true)
@@ -838,6 +994,65 @@ struct PulseEffect: ViewModifier {
             .opacity(running ? (phase ? 1 : 0.9) : 1)
             .animation(running ? IslandMotion.pulse : IslandMotion.contentOut, value: phase)
             .task(id: running) { phase = running }
+    }
+}
+
+// MARK: - Blinking dot (item 24)
+
+/// Small red dot shown next to the timer while recording. Blinks at a steady
+/// ~1s cadence (opacity 0.2 ↔ 1.0, 0.5s each half = 1s full cycle).
+/// Reduce Motion: static dot, no animation.
+struct BlinkingDot: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var blinkPhase = false
+
+    var body: some View {
+        Circle()
+            .fill(Color.red)
+            .frame(width: 6, height: 6)
+            .opacity(reduceMotion ? 1.0 : (blinkPhase ? 1.0 : 0.2))
+            .animation(reduceMotion ? nil : IslandMotion.blink, value: blinkPhase)
+            .onAppear {
+                guard !reduceMotion else { return }
+                blinkPhase = true
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Mic level meter (item 20 — island side)
+
+/// A compact 5-bar level meter rendered next to the Stop button in the bottom
+/// bar while recording. Transform/opacity only (Emil-style). The caller
+/// conditionally shows this view with a .transition(.opacity) for clean in/out.
+struct MicLevelBar: View {
+    /// 0…1, published by AudioRecorder at ~10 Hz.
+    /// ORCHESTRATOR-GLUE: manager.audioRecorder.micLevel: Float
+    var level: Float
+
+    private let barCount = 5
+    private let barWidth: CGFloat = 3
+    private let barSpacing: CGFloat = 2
+    private let maxHeight: CGFloat = 14
+    private let minHeight: CGFloat = 3
+
+    var body: some View {
+        HStack(alignment: .center, spacing: barSpacing) {
+            ForEach(0..<barCount, id: \.self) { i in
+                let threshold = Float(i) / Float(barCount)
+                let lit = level > threshold
+                let heightFraction = CGFloat(i + 1) / CGFloat(barCount)
+                let barH = minHeight + (maxHeight - minHeight) * heightFraction
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(lit ? Color.green : Color.white.opacity(0.15))
+                    .frame(width: barWidth, height: barH)
+                    // Transform only: scale vertically from center
+                    .scaleEffect(y: lit ? 1.0 : 0.6, anchor: .bottom)
+                    .animation(IslandMotion.contentIn, value: lit)
+            }
+        }
+        .frame(height: maxHeight)
+        .accessibilityHidden(true)
     }
 }
 
@@ -906,7 +1121,8 @@ struct DestinationRow: View {
                     }
                     Spacer(minLength: 4)
                 }
-                .padding(.vertical, 3)
+                // item 27: roomier vertical padding in destination rows
+                .padding(.vertical, 5)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -922,7 +1138,8 @@ struct DestinationRow: View {
             }
         }
         .padding(.horizontal, 8)
-        .frame(minHeight: 30)
+        // item 27: slightly taller row for breathing room
+        .frame(minHeight: 32)
         // Hover tint is instant: rows are scanned many times a day.
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
