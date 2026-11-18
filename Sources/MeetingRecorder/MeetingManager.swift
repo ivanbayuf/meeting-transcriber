@@ -183,6 +183,9 @@ final class MeetingManager: ObservableObject {
     /// True between a successful capture start and stop. Published (unlike
     /// `Meeting.status`) so views redraw the moment recording begins/ends.
     @Published private(set) var isRecording = false
+    /// True when the mic TCC grant is missing/denied. Drives the island's
+    /// in-app mic-permission card; cleared on the next Record attempt.
+    @Published var micPermissionNeeded = false
     /// Wall-clock start of the active recording; drives the island timer.
     @Published private(set) var recordingStartedAt: Date?
     /// Result of the most recent successful pipeline run.
@@ -249,6 +252,7 @@ final class MeetingManager: ObservableObject {
         errorMessage = nil
         lastReport = nil
         permissionNeeded = false
+        micPermissionNeeded = false
 
         // System audio needs the display list — fetched only now, on Record.
         var display: SCDisplay?
@@ -284,7 +288,13 @@ final class MeetingManager: ObservableObject {
             recordingStartedAt = Date()
             isRecording = true
         } catch {
-            errorMessage = "Failed to start recording: \(error.localizedDescription)"
+            if let recorderError = error as? AudioRecorderError,
+               case .micPermissionDenied = recorderError {
+                micPermissionNeeded = true
+                errorMessage = "Microphone access is required. Enable it in System Settings → Privacy & Security → Microphone, then record again."
+            } else {
+                errorMessage = "Failed to start recording: \(error.localizedDescription)"
+            }
             meeting.status = .failed
         }
     }
@@ -324,6 +334,18 @@ final class MeetingManager: ObservableObject {
         }
 
         meeting.audioURL = audioURL
+
+        // Item 16: empty-audio guard. If nothing was captured, don't call the
+        // Groq pipeline (avoids the 400 "audio too short"). Keep the temp file.
+        let frames = audioRecorder.totalFrames
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioURL.path)[.size] as? Int) ?? 0
+        if frames == 0 || fileSize <= 44 {
+            meeting.status = .failed
+            errorMessage = "No audio captured — check Screen & System Audio and Microphone permissions, then record again"
+            saveHistory()
+            return
+        }
+
         await processMeeting(meeting)
     }
 
