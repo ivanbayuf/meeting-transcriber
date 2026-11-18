@@ -5,13 +5,19 @@ Meeting Transcriber — quick start
    Drag Meeting Transcriber from the disk image into your Applications folder.
 
 2) FIRST OPEN (one time only)
-   macOS may show: "Meeting Transcriber can't be opened because the developer
-   can't be verified." This is normal for personal apps that aren't on the
-   App Store — it does NOT mean your Mac is unsafe.
-     a. Right-click (or two-finger tap) Meeting Transcriber in Applications
-     b. Choose "Open"
-     c. Click "Open" again on the dialog
-   From then on it opens normally.
+   The first time, macOS blocks the app with a message like
+   "Meeting Transcriber" Not Opened / "Apple could not verify ... is free of
+   malware". This is normal for personal apps that aren't from the App Store
+   or a paid Apple developer account — it does NOT mean your Mac is unsafe.
+     a. Double-click Meeting Transcriber in Applications. When the warning
+        appears, click "Done" (NOT "Move to Trash").
+     b. Open System Settings > Privacy & Security.
+     c. Scroll down to the "Security" section. You'll see:
+        "Meeting Transcriber" was blocked to protect your Mac.
+     d. Click "Open Anyway", then confirm with your password or Touch ID.
+     e. Click "Open Anyway" once more on the dialog that appears.
+   From then on it opens normally. (You'll need to do this again after
+   installing a newer version.)
 
 3) GIVE IT PERMISSIONS
    When you press Record, macOS asks for:
