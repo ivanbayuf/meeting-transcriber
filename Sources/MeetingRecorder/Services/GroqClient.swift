@@ -237,6 +237,7 @@ final class GroqClient: @unchecked Sendable {
             - keep every decision and action point (with owners and dates), de-duplicated
             - open questions: drop any that a later part answered
             - key topics: 3-7 for the whole meeting
+            - keep the notes' original language; do not translate
 
             \(numbered)
             """))
@@ -359,6 +360,7 @@ You are an expert meeting summarizer. Output ONLY valid JSON matching this exact
 }
 
 Rules:
+- LANGUAGE: write every field (title, summary, key points, decisions, actions, questions, topics) in the SAME language as the transcript. Never translate to English. If the meeting mixes languages, use the language spoken most; keep names and technical terms as said.
 - The transcript has no speaker labels and who said what does not matter. Do NOT attribute points to anyone: never write "the speaker", "the facilitator", "the participant", "they said/describe/express". Write the insights as direct statements ("Missing someone is often missing who you were with them."). Names only for action-item owners.
 - Key points: be specific, not generic. Each point gives actual content ("Letting go is hard because it feels like losing part of your identity."), not just a topic ("Letting go was discussed."). One idea per point, at most ~25 words. A question that was answered becomes a point stating its answer. 3-8 points; longer meetings may use more.
 - Owner is ONLY what was explicitly stated. If not stated, use "unassigned".

@@ -25,7 +25,10 @@ One free Groq key, nothing to download, no setup beyond that.
   plus your mic — no Screen Recording permission needed.
 - **Light and free to run.** No 1 GB model to download; runs on any Apple-silicon Mac
   with macOS 14.2+. A free Groq key covers about 8 hours of meetings a day.
-- **Mixed languages are fine** — English, Indonesian, Japanese and mixes.
+- **Any language, kept as spoken.** Transcription uses Groq's Whisper, so every language
+  Whisper supports (about 99 — English, Indonesian, Japanese, Spanish, Hindi, Arabic,
+  Chinese, …) is detected automatically, mixed-language meetings included. The notes are
+  written in the meeting's own language — never translated to English.
 
 ## The journey
 

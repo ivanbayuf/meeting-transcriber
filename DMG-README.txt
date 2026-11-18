@@ -107,6 +107,9 @@ Notes:
      It is uploaded to Groq compressed (about 120 KB per minute). Long meetings
      are processed 10 minutes at a time while you record, so notes are ready
      seconds after you stop. Groq's free plan covers about 8 hours a day.
-   - Mixed languages are fine (English, Indonesian, Japanese, and mixes).
+   - Any language Whisper supports (about 99) is detected automatically, and
+     mixed-language meetings work. Notes are written in the meeting's own
+     language, not translated. (Settings > Transcription Language can pin
+     English, Indonesian or Japanese if auto-detect guesses wrong.)
    - If a model stops working (Groq sometimes retires them): Settings >
      Groq > "Advanced" to pick a different model.
