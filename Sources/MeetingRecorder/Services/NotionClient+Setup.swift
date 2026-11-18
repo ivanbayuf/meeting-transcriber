@@ -1,197 +1,111 @@
 import Foundation
 
-// MARK: - Notion auto-setup: "Meeting Transcription" project + Meetings database inside it
-// Separate file so it does not collide with the main NotionClient.
-// Uses NotionClient's internal `apiToken` / `databaseID`; re-declares the
-// base constants here because they are `private` to NotionClient.swift.
+// MARK: - Setup a Meetings database inside the user's shared page
 
 private let notionBaseURL = "https://api.notion.com/v1"
 private let notionAPIVersion = "2022-06-28"
 
-// Minimal /search response shape
-private struct SearchResponse: Decodable {
-    struct RT: Decodable {
-        struct T: Decodable { let content: String }
-        let type: String
-        let text: T?
-    }
-    struct Result: Decodable {
-        let object: String
-        let id: String
-        let title: [RT]?
-    }
-    let results: [Result]
-}
-
 extension NotionClient {
-
-    // MARK: - Token
-
-    /// Verifies the integration secret is valid (GET /users/me). No database needed.
-    func verifyToken() async -> Bool {
-        guard !apiToken.isEmpty else { return false }
-        var request = URLRequest(url: URL(string: "\(notionBaseURL)/users/me")!)
-        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(notionAPIVersion, forHTTPHeaderField: "Notion-Version")
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode == 200
-        } catch { return false }
+    /// Validates an integration secret, checks access to the selected page, and
+    /// creates (or reuses) its Meetings database. Returns a dashless ID.
+    @discardableResult
+    func connectAndSetup(pageID: String) async throws -> String {
+        try await requireValidToken()
+        try await requirePageAccess(pageID: pageID)
+        let databaseID = try await ensureMeetingsDatabase(pageID: pageID)
+        self.databaseID = databaseID.replacingOccurrences(of: "-", with: "")
+        return self.databaseID
     }
 
-    /// Throwing variant for Connect, so the UI can tell a bad secret (401)
-    /// apart from being offline (URLError) or another API error.
+    private func request(_ path: String, method: String = "GET", body: String? = nil) -> URLRequest {
+        var request = URLRequest(url: URL(string: "\(notionBaseURL)\(path)")!)
+        request.httpMethod = method
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(notionAPIVersion, forHTTPHeaderField: "Notion-Version")
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body.data(using: .utf8)
+        }
+        return request
+    }
+
     private func requireValidToken() async throws {
-        guard !apiToken.isEmpty else { throw NotionError.unauthorized }
-        var request = URLRequest(url: URL(string: "\(notionBaseURL)/users/me")!)
-        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(notionAPIVersion, forHTTPHeaderField: "Notion-Version")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        guard !apiToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NotionError.unauthorized
+        }
+        let (_, response) = try await URLSession.shared.data(for: request("/users/me"))
         guard let http = response as? HTTPURLResponse else { throw NotionError.invalidResponse }
         if http.statusCode == 401 { throw NotionError.unauthorized }
-        if http.statusCode != 200 {
-            throw NotionError.apiError(http.statusCode, String(data: data, encoding: .utf8) ?? "Unknown error")
-        }
+        guard http.statusCode == 200 else { throw NotionError.apiError(http.statusCode, "") }
     }
 
-    // MARK: - Project page ("Meeting Transcription")
-
-    /// Searches for an existing top-level page titled "Meeting Transcription".
-    /// Fails soft: returns nil on any problem so the caller can just create one.
-    private func findProjectPage() async -> String? {
-        guard !apiToken.isEmpty else { return nil }
-        let body = """
-        { "query": "Meeting Transcription",
-          "filter": { "property": "object", "value": "page" },
-          "page": { "size": 50 } }
-        """
-        var request = URLRequest(url: URL(string: "\(notionBaseURL)/search")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(notionAPIVersion, forHTTPHeaderField: "Notion-Version")
-        request.httpBody = body.data(using: .utf8)
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
-            let decoded = try JSONDecoder().decode(SearchResponse.self, from: data)
-            for result in decoded.results {
-                guard result.object == "page" else { continue }
-                let title = result.title?.first(where: { $0.type == "text" })?.text?.content ?? ""
-                if title == "Meeting Transcription" { return result.id }
-            }
-            return nil
-        } catch { return nil }
-    }
-
-    private func createProjectPage() async throws -> String {
-        let body = """
-        { "parent": { "type": "workspace", "workspace": true },
-          "title": [ { "type": "text", "text": { "content": "Meeting Transcription" } } ] }
-        """
-        var request = URLRequest(url: URL(string: "\(notionBaseURL)/pages")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(notionAPIVersion, forHTTPHeaderField: "Notion-Version")
-        request.httpBody = body.data(using: .utf8)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
+    private func requirePageAccess(pageID: String) async throws {
+        let (data, response) = try await URLSession.shared.data(for: request("/blocks/\(pageID)/children"))
         guard let http = response as? HTTPURLResponse else { throw NotionError.invalidResponse }
         if http.statusCode == 401 { throw NotionError.unauthorized }
-        if http.statusCode != 200 {
-            let text = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NotionError.apiError(http.statusCode, text)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        if http.statusCode == 404 {
+            if text.contains("restricted_resource") { throw NotionError.apiError(http.statusCode, text) }
+            throw NotionError.databaseNotFound
         }
-        struct PageResp: Decodable { let id: String }
-        return try JSONDecoder().decode(PageResp.self, from: data).id
+        guard http.statusCode == 200 else { throw NotionError.apiError(http.statusCode, text) }
     }
 
-    /// Ensures a "Meeting Transcription" project page exists; returns its ID.
-    private func ensureProjectPage() async throws -> String {
-        if let existing = await findProjectPage() { return existing }
-        return try await createProjectPage()
-    }
-
-    // MARK: - Meetings database (inside the project)
-
-    private struct BlockChild: Decodable {
-        struct DB: Decodable {
-            struct RT: Decodable {
-                struct T: Decodable { let content: String }
-                let type: String
-                let text: T?
+    private struct ChildrenResponse: Decodable {
+        struct Child: Decodable {
+            struct ChildDatabase: Decodable {
+                let title: String
             }
-            let id: String
-            let title: [RT]?
-        }
-        let type: String
-        let database: DB?
-    }
-    private struct ChildrenResponse: Decodable { let results: [BlockChild] }
-
-    /// Ensures a "Meetings" database exists inside the given project page; returns its ID.
-    private func ensureMeetingsDatabase(projectPageID: String) async throws -> String {
-        // 1) reuse an existing "Meetings" database that is a child of the project
-        var childrenRequest = URLRequest(url: URL(string: "\(notionBaseURL)/blocks/\(projectPageID)/children")!)
-        childrenRequest.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        childrenRequest.setValue(notionAPIVersion, forHTTPHeaderField: "Notion-Version")
-        do {
-            let (childrenData, childrenResponse) = try await URLSession.shared.data(for: childrenRequest)
-            if (childrenResponse as? HTTPURLResponse)?.statusCode == 200,
-               let decoded = try? JSONDecoder().decode(ChildrenResponse.self, from: childrenData) {
-                for child in decoded.results where child.type == "child_database" || child.type == "database" {
-                    guard let db = child.database else { continue }
-                    let title = db.title?.first(where: { $0.type == "text" })?.text?.content ?? ""
-                    if title == "Meetings" { return db.id }
+            struct Database: Decodable {
+                struct RichText: Decodable {
+                    struct Text: Decodable { let content: String }
+                    let type: String
+                    let text: Text?
                 }
+                let id: String
+                let title: [RichText]?
             }
-        } catch { /* fall through to create */ }
+            let type: String
+            let id: String
+            let database: Database?
+            let child_database: ChildDatabase?
+        }
+        let results: [Child]
+    }
 
-        // 2) create it inside the project
+    private func ensureMeetingsDatabase(pageID: String) async throws -> String {
+        let (data, response) = try await URLSession.shared.data(for: request("/blocks/\(pageID)/children"))
+        guard let http = response as? HTTPURLResponse else { throw NotionError.invalidResponse }
+        if http.statusCode == 401 { throw NotionError.unauthorized }
+        let text = String(data: data, encoding: .utf8) ?? ""
+        guard http.statusCode == 200 else { throw NotionError.apiError(http.statusCode, text) }
+        let children = try JSONDecoder().decode(ChildrenResponse.self, from: data)
+        for child in children.results where child.type == "child_database" || child.type == "database" {
+            if let database = child.database {
+                let title = database.title?.first(where: { $0.type == "text" })?.text?.content ?? ""
+                if title == "Meetings" { return database.id.replacingOccurrences(of: "-", with: "") }
+            } else if child.child_database?.title == "Meetings" {
+                return child.id.replacingOccurrences(of: "-", with: "")
+            }
+        }
+
         let body = """
         {
-          "parent": { "type": "page_id", "page_id": "\(projectPageID)" },
+          "parent": { "type": "page_id", "page_id": "\(pageID)" },
           "title": [ { "type": "text", "text": { "content": "Meetings" } } ],
           "properties": {
-            "title":  { "title": {} },
-            "date":   { "date": {} },
+            "title": { "title": {} },
+            "date": { "date": {} },
             "status": { "select": { "options": [ { "name": "Done" } ] } }
           }
         }
         """
-        var createRequest = URLRequest(url: URL(string: "\(notionBaseURL)/databases")!)
-        createRequest.httpMethod = "POST"
-        createRequest.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        createRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        createRequest.setValue(notionAPIVersion, forHTTPHeaderField: "Notion-Version")
-        createRequest.httpBody = body.data(using: .utf8)
-
-        let (data, response) = try await URLSession.shared.data(for: createRequest)
-        guard let http = response as? HTTPURLResponse else { throw NotionError.invalidResponse }
-        if http.statusCode == 401 { throw NotionError.unauthorized }
-        if http.statusCode != 200 {
-            let text = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NotionError.apiError(http.statusCode, text)
-        }
-        struct DBResp: Decodable { let id: String }
-        return try JSONDecoder().decode(DBResp.self, from: data).id
+        let (createdData, createdResponse) = try await URLSession.shared.data(for: request("/databases", method: "POST", body: body))
+        guard let createdHTTP = createdResponse as? HTTPURLResponse else { throw NotionError.invalidResponse }
+        if createdHTTP.statusCode == 401 { throw NotionError.unauthorized }
+        let createdText = String(data: createdData, encoding: .utf8) ?? ""
+        guard createdHTTP.statusCode == 200 else { throw NotionError.apiError(createdHTTP.statusCode, createdText) }
+        struct DatabaseResponse: Decodable { let id: String }
+        return try JSONDecoder().decode(DatabaseResponse.self, from: createdData).id.replacingOccurrences(of: "-", with: "")
     }
-
-    // MARK: - One-tap connect
-
-    /// One-tap connect: verify the secret, ensure the "Meeting Transcription" project
-    /// exists, ensure the "Meetings" database lives inside it, and point
-    /// `databaseID` at it. Repeat connects never create duplicates.
-    @discardableResult
-    func connectAndSetup() async throws -> String {
-        try await requireValidToken()
-        let projectID = try await ensureProjectPage()
-        let databaseID = try await ensureMeetingsDatabase(projectPageID: projectID)
-        self.databaseID = databaseID
-        return databaseID
-    }
-    // (The "use an existing database" manual path was removed — connect is
-    //  one secret + auto setup only.)
 }

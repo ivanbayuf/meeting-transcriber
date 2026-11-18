@@ -7,9 +7,7 @@ struct SettingsView: View {
     static let height: CGFloat = 600
 
     @EnvironmentObject var manager: MeetingManager
-    @State private var testGroqSuccess: Bool?
-    @State private var showingTestAlert = false
-    @State private var testAlertMessage = ""
+    @State private var isTestingGroq = false
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -18,45 +16,52 @@ struct SettingsView: View {
                 .onChange(of: manager.settingsFocus) { _, section in scroll(proxy, to: section) }
         }
         .frame(width: Self.width, height: Self.height)
-        .alert("Connection Test", isPresented: $showingTestAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(testAlertMessage)
-        }
     }
 
     private var form: some View {
         Form {
-            Section("Groq API (separate account for this app)") {
+            Section("Groq API") {
                 SecureField("API Key", text: $manager.groqAPIKey)
-
-                Picker("Transcription Model", selection: $manager.transcriptionModel) {
-                    ForEach(AppSettings.availableTranscriptionModels, id: \.self) { model in
-                        Text(model).tag(model)
-                    }
-                }
-
-                Picker("Summary Model", selection: $manager.summaryModel) {
-                    ForEach(AppSettings.availableSummaryModels, id: \.self) { model in
-                        Text(model).tag(model)
-                    }
-                }
-
-                Picker("Fallback Summary Model", selection: $manager.fallbackSummaryModel) {
-                    ForEach(AppSettings.availableSummaryModels, id: \.self) { model in
-                        Text(model).tag(model)
-                    }
-                }
-
                 HStack {
-                    Button("Test Groq Connection") {
-                        Task { await testGroq() }
+                    Button(isTestingGroq ? "Testing…" : "Test") {
+                        Task {
+                            isTestingGroq = true
+                            _ = await manager.verifyGroqKey()
+                            isTestingGroq = false
+                        }
                     }
-                    .disabled(manager.groqAPIKey.isEmpty)
+                    .disabled(isTestingGroq || manager.groqAPIKey.isEmpty)
 
-                    if let success = testGroqSuccess {
-                        Image(systemName: success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundStyle(success ? Color.green : Color.red)
+                    switch manager.groqKeyState {
+                    case .idle:
+                        EmptyView()
+                    case .valid:
+                        Label("Connected", systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    case .error(let message):
+                        Label(message, systemImage: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                DisclosureGroup("Advanced") {
+                    Picker("Transcription Model", selection: $manager.transcriptionModel) {
+                        ForEach(AppSettings.availableTranscriptionModels, id: \.self) { model in
+                            Text(model).tag(model)
+                        }
+                    }
+                    Picker("Summary Model", selection: $manager.summaryModel) {
+                        ForEach(AppSettings.availableSummaryModels, id: \.self) { model in
+                            Text(model).tag(model)
+                        }
+                    }
+                    Picker("Fallback Summary Model", selection: $manager.fallbackSummaryModel) {
+                        ForEach(AppSettings.availableSummaryModels + ["openai/gpt-oss-20b"], id: \.self) { model in
+                            Text(model).tag(model)
+                        }
                     }
                 }
             }
@@ -126,21 +131,6 @@ struct SettingsView: View {
         }
     }
 
-    private func testGroq() async {
-        do {
-            let url = URL(string: "https://api.groq.com/openai/v1/models")!
-            var request = URLRequest(url: url)
-            request.setValue("Bearer \(manager.groqAPIKey)", forHTTPHeaderField: "Authorization")
-            let (_, response) = try await URLSession.shared.data(for: request)
-            let success = (response as? HTTPURLResponse)?.statusCode == 200
-            testGroqSuccess = success
-            testAlertMessage = success ? "Groq connection successful!" : "Groq test failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)). Check API key."
-        } catch {
-            testGroqSuccess = false
-            testAlertMessage = "Groq test failed: \(error.localizedDescription)"
-        }
-        showingTestAlert = true
-    }
 }
 
 /// One radio row in Settings → "Send notes to". Setup first: a destination

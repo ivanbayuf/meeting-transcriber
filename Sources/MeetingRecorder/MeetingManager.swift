@@ -16,7 +16,10 @@ final class MeetingManager: ObservableObject {
     let notionClient = NotionClient()
 
     @AppStorage("groqAPIKey") var groqAPIKey: String = "" {
-        didSet { groqClient.apiKey = groqAPIKey }
+        didSet {
+            groqClient.apiKey = groqAPIKey
+            groqKeyState = .idle
+        }
     }
     @AppStorage("transcriptionModel") var transcriptionModel: String = "whisper-large-v3-turbo" {
         didSet { groqClient.transcriptionModel = transcriptionModel }
@@ -24,7 +27,7 @@ final class MeetingManager: ObservableObject {
     @AppStorage("summaryModel") var summaryModel: String = "openai/gpt-oss-120b" {
         didSet { groqClient.summaryModel = summaryModel }
     }
-    @AppStorage("fallbackSummaryModel") var fallbackSummaryModel: String = "llama-3.3-70b-versatile" {
+    @AppStorage("fallbackSummaryModel") var fallbackSummaryModel: String = "openai/gpt-oss-20b" {
         didSet { groqClient.fallbackSummaryModel = fallbackSummaryModel }
     }
     // willSet → objectWillChange: @AppStorage inside an ObservableObject does not
@@ -106,7 +109,40 @@ final class MeetingManager: ObservableObject {
         outputDestination = .markdown
     }
 
-    // MARK: Notion connect — one secret → verify → find-or-create project + database
+    // MARK: Notion and Groq connection status
+
+    enum GroqKeyState: Equatable {
+        case idle
+        case valid
+        case error(String)
+    }
+    @Published private(set) var groqKeyState: GroqKeyState = .idle
+
+    func verifyGroqKey() async -> Bool {
+        let key = groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            groqKeyState = .error("Enter a Groq API key.")
+            return false
+        }
+        var request = URLRequest(url: URL(string: "https://api.groq.com/openai/v1/models")!)
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if (response as? HTTPURLResponse)?.statusCode == 200 {
+                groqKeyState = .valid
+                return true
+            }
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            groqKeyState = .error("Groq check failed (HTTP \(code)). Check the key.")
+            return false
+        } catch {
+            groqKeyState = .error("Couldn’t reach Groq. Check your connection and try again.")
+            return false
+        }
+    }
+
+    @Published private(set) var notionConnected = false
+    @Published var notionError: String?
 
     enum NotionConnectState: Equatable {
         case idle
@@ -115,28 +151,54 @@ final class MeetingManager: ObservableObject {
     }
     @Published private(set) var notionConnectState: NotionConnectState = .idle
 
-    func connectNotion(secret: String) async {
+    func connectNotion(secret: String, pageLink: String) async {
         let token = secret.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty, notionConnectState != .connecting else { return }
+        guard notionConnectState != .connecting else { return }
+        guard let pageID = Self.lastNotionPageID(in: pageLink) else {
+            notionError = "Enter a valid Notion page link or 32-character page ID."
+            return
+        }
+        guard !token.isEmpty else {
+            notionError = Self.connectMessage(for: NotionError.unauthorized)
+            return
+        }
         notionConnectState = .connecting
-        notionToken = token          // remembered even if setup fails
+        notionError = nil
         notionDatabaseID = ""
+        notionClient.apiToken = token
         do {
-            let databaseID = try await notionClient.connectAndSetup()
-            notionDatabaseID = databaseID
+            let databaseID = try await notionClient.connectAndSetup(pageID: pageID)
+            notionToken = token
+            notionDatabaseID = databaseID.replacingOccurrences(of: "-", with: "")
+            notionConnected = true
             notionConnectState = .idle
             outputDestination = .notion
         } catch {
             logger.error("Notion connect failed: \(error)")
-            notionConnectState = .failed(Self.connectMessage(for: error))
+            let message = Self.connectMessage(for: error)
+            notionError = message
+            notionConnectState = .failed(message)
+            notionClient.apiToken = notionToken
         }
     }
 
     func disconnectNotion() {
         notionDatabaseID = ""
         notionToken = ""
+        notionConnected = false
+        notionError = nil
         notionConnectState = .idle
-        if outputDestination == .notion { outputDestination = .clipboard }
+        if outputDestination == .notion {
+            outputDestination = markdownConfigured ? .markdown : .clipboard
+        }
+    }
+
+    private static func lastNotionPageID(in value: String) -> String? {
+        let pattern = "[0-9a-fA-F]{32}"
+        let nsValue = value as NSString
+        let range = nsValue.range(of: pattern, options: [.regularExpression, .backwards])
+        guard range.location != NSNotFound else { return nil }
+        return nsValue.substring(with: range).lowercased()
     }
 
     private static func connectMessage(for error: any Error) -> String {
@@ -144,14 +206,18 @@ final class MeetingManager: ObservableObject {
             switch notionError {
             case .unauthorized:
                 return "Notion didn’t accept that secret. Copy the whole Internal Integration Secret and try again."
+            case .databaseNotFound:
+                return "Page not found. Check the page link and make sure it is shared with this integration."
             case .apiError(let code, _) where code == 400 || code == 403 || code == 404:
-                return "The secret works, but the integration has no access. In Notion open a page → ⋯ → Connections → add your integration, then try again."
+                return "Add this integration to that page: open the page → ⋯ → Connections → tick it, then retry"
+            case .apiError(_, let message) where message.contains("restricted_resource"):
+                return "Add this integration to that page: open the page → ⋯ → Connections → tick it, then retry"
             default:
                 break
             }
         }
         if let urlError = error as? URLError {
-            return "Couldn’t reach Notion (\(urlError.localizedDescription)). Check your connection and try again."
+            return "Couldn’t reach Notion. Check your internet connection and try again."
         }
         return "Setup failed: \(error.localizedDescription)"
     }
@@ -211,6 +277,7 @@ final class MeetingManager: ObservableObject {
         groqClient.fallbackSummaryModel = fallbackSummaryModel
         notionClient.apiToken = notionToken
         notionClient.databaseID = notionDatabaseID
+        notionConnected = notionConfigured
 
         loadHistory()
         migrateLegacyOutputs()
