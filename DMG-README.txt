@@ -20,16 +20,16 @@ Meeting Transcriber — quick start
    installing a newer version.)
 
 3) GIVE IT PERMISSIONS
-   When you press Record, macOS asks for:
-     - Screen & System Audio Recording  → turn ON (records the meeting sound)
-     - Microphone                       → turn ON (records your own voice)
-   Both are in: System Settings > Privacy & Security.
-   If you turn one on, quit and re-open the app once.
+   The first time you press Record, macOS asks for two things — allow both:
+     - System Audio Recording  (records the meeting: Meet, Teams, Zoom…)
+     - Microphone              (records your own voice)
+   Both live in System Settings > Privacy & Security. Screen Recording is
+   NOT needed. You still hear the meeting normally while it records.
 
-   After installing a NEW version, macOS treats it as a different app:
-   in Screen & System Audio Recording, select Meeting Transcriber, press "-"
-   to remove it, then press Record again and allow it. (Or run this in
-   Terminal: tccutil reset ScreenCapture com.ivanbayu.meetingrecorder)
+   If you clicked "Don't Allow" by mistake, or a new version stops picking
+   up the meeting sound, reset it in Terminal and press Record again:
+     tccutil reset AudioCapture com.ivanbayu.meetingrecorder
+     tccutil reset Microphone com.ivanbayu.meetingrecorder
 
 4) ADD YOUR OWN GROQ API KEY (required, free)
    The app uses YOUR key — it doesn't ship with anyone's.
@@ -65,29 +65,41 @@ Meeting Transcriber — quick start
       page link > "Connect & Set Up". The app creates your "Meetings"
       database inside that page automatically. Done forever.
 
-6) CHOOSE WHERE YOUR NOTES GO
-   In the island, pick ONE: Notion / Markdown folder / clipboard.
+6) CONNECT GOOGLE DOCS (optional, one time)
+   In the island (or Settings), next to Google Docs click "Connect Google".
+   Your browser opens: pick your Google account and click "Allow".
+   The app can only see the files it creates itself — nothing else in your
+   Drive. Notes go into a "Meeting Notes" folder, one Google Doc per meeting.
+   To undo: "Disconnect" in Settings (this also signs the app out of Google).
+
+7) CHOOSE WHERE YOUR NOTES GO
+   In the island, pick ONE: Notion / Google Docs / Markdown folder / clipboard.
    - Notion: only after you finished step 5.
+   - Google Docs: only after you finished step 6.
    - Markdown: pick the folder first ("Choose directory").
    - Clipboard: nothing to set — notes are copied when the meeting ends.
 
-7) RECORD A MEETING
+8) RECORD A MEETING
    a. Click the mic icon on the left of the island to start.
    b. While recording, the mic turns into red bars that move with the
       sound — your voice and the other people in the call. The timer
       shows on the right.
    c. To stop: hover the red bars (they turn into a stop square) and click.
    d. The island shows "Transcribing…", then "Summarizing…", then
-      "Saving…", and finally "Saved to Notion" with an open button (↗).
+      "Saving…", and finally "Saved to …" with an open button (↗).
 
-   What you get: a page/file titled after what the meeting was about
-   (written by the AI), with the summary, decisions, action items, open
-   questions and topics. Notion pages hold the summary only; Markdown files
-   and the clipboard also include the full transcript.
+   What you get — the same meeting minutes everywhere, titled after what the
+   meeting was about (written by the AI):
+     Purpose · Key points · Decisions · Action items (checkboxes) ·
+     Open questions & risks
+   Notion pages and Google Docs hold the minutes only; Markdown files and
+   the clipboard also include the full transcript at the bottom.
 
 Notes:
    - Nothing is recorded until you press the record (mic) button.
    - Audio is kept only until your notes are saved successfully, then deleted.
+     It is uploaded to Groq compressed (about 120 KB per minute), so meetings
+     of up to ~3 hours work on Groq's free plan.
    - Mixed languages are fine (English, Indonesian, Japanese, and mixes).
    - If a model stops working (Groq sometimes retires them): Settings >
      Groq > "Advanced" to pick a different model.

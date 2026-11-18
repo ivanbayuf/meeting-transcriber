@@ -15,12 +15,16 @@ enum MarkdownExporter {
         lines.append(metaLine(start: meeting.startDate, end: meeting.endDate))
         lines.append("")
 
-        lines.append("## Summary")
+        lines.append("## Purpose")
         lines.append("")
         lines.append(summary.summary.isEmpty ? "_No summary._" : summary.summary)
         lines.append("")
+        lines.append("## Key points")
+        lines.append("")
+        lines.append(contentsOf: bullets(summary.keyPoints ?? []))
+        lines.append("")
 
-        lines.append("## Key decisions")
+        lines.append("## Decisions")
         lines.append("")
         lines.append(contentsOf: bullets(summary.keyDecisions.map { decision in
             if let context = decision.context, !context.isEmpty {
@@ -30,7 +34,7 @@ enum MarkdownExporter {
         }))
         lines.append("")
 
-        lines.append("## Action points")
+        lines.append("## Action items")
         lines.append("")
         if summary.actionPoints.isEmpty {
             lines.append("_None._")
@@ -42,7 +46,7 @@ enum MarkdownExporter {
         }
         lines.append("")
 
-        lines.append("## Open questions")
+        lines.append("## Open questions & risks")
         lines.append("")
         lines.append(contentsOf: bullets(summary.openQuestions.map { question in
             if let context = question.context, !context.isEmpty {
@@ -50,11 +54,6 @@ enum MarkdownExporter {
             }
             return question.question
         }))
-        lines.append("")
-
-        lines.append("## Key topics")
-        lines.append("")
-        lines.append(contentsOf: bullets(summary.keyTopics))
         lines.append("")
 
         lines.append("## Transcript")

@@ -9,9 +9,6 @@ struct SCWindowBox: @unchecked Sendable {
     let process: SCRunningApplication?
     let window: SCWindow?
 }
-struct SCDisplayBox: @unchecked Sendable {
-    let display: SCDisplay
-}
 
 // MARK: - Audio Recorder Service
 /// Records meeting audio: system audio from selected window (ScreenCaptureKit) + microphone
@@ -33,6 +30,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     private var systemAudioStream: SCStream?
     private var systemAudioOutput: SystemAudioOutput?
     private var systemVideoOutput: SystemVideoOutput?
+    private var systemAudioTap: SystemAudioTap?
     private var recordingStartTime: Date?
     private var timer: Timer?
 
@@ -43,6 +41,11 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     // Mic-level throttle state (only touched from the mic tap queue).
     private var lastMicLevelUpdate: CFAbsoluteTime = 0
     private var sourceLevels: [Source: Float] = [:]      // guarded by writeLock
+    /// Loudest level per source this recording — logged at stop, so a silent source is obvious.
+    private var peakLevels: [Source: Float] = [:]        // guarded by writeLock
+    /// Raw (pre-conversion) frames per source; with duration this gives the real input rate.
+    private var inputFrames: [Source: Int] = [:]         // guarded by writeLock
+    private var inputRates: [Source: Double] = [:]       // guarded by writeLock
     private var lastAudioLevelUpdate: CFAbsoluteTime = 0 // guarded by writeLock
 
     /// Which capture path a buffer came from. Mic and system audio arrive on
@@ -211,6 +214,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
         // Same mapping as the mic meter: ~0.25 RMS (loud speech) fills the bar.
         sourceLevels[source] = min(sqrtf(sumSquares / Float(count)) * 4, 1)
+        peakLevels[source] = max(peakLevels[source] ?? 0, sourceLevels[source] ?? 0)
         let now = CFAbsoluteTimeGetCurrent()
         guard now - lastAudioLevelUpdate >= 0.05 else { return }
         lastAudioLevelUpdate = now
@@ -244,8 +248,8 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
 
     // MARK: - System Audio (ScreenCaptureKit)
 
-    func startRecordingSystemAudio(display: SCDisplayBox, outputURL: URL) async throws {
-        let display = display.display
+    /// Whole-system audio (every app) via a Core Audio process tap + the mic.
+    func startRecordingSystemAudio(outputURL: URL) async throws {
         guard !isRecording else { throw AudioRecorderError.alreadyRecording }
 
         self.outputURL = outputURL
@@ -259,7 +263,16 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         audioFile = try AVAudioFile(forWriting: outputURL, settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: true)
 
         try await startMicrophoneCapture()
-        try await startSystemAudioCapture(display: display)
+        let tap = SystemAudioTap()
+        do {
+            try tap.start { [weak self] buffer in self?.writeBuffer(buffer, from: .system) }
+        } catch {
+            tap.stop()
+            stopMicrophoneCapture()
+            audioFile = nil
+            throw error
+        }
+        systemAudioTap = tap
 
         isRecording = true
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -268,41 +281,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
                 self.currentDuration = Date().timeIntervalSince(start)
             }
         }
-        logger.info("System audio recording started (whole display)")
-    }
-
-    private func startSystemAudioCapture(display: SCDisplay) async throws {
-        let configuration = SCStreamConfiguration()
-        configuration.capturesAudio = true
-        configuration.excludesCurrentProcessAudio = true
-        configuration.sampleRate = 16000
-        configuration.channelCount = 1
-        // SCK audio-only quirk: audio buffers only flow once a video pipeline
-        // exists. Set a pixel format and register a no-op video output below.
-        configuration.pixelFormat = kCVPixelFormatType_32BGRA
-        configuration.width = 2
-        configuration.height = 2
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-
-        let output = SystemAudioOutput()
-        output.onBuffer = { [weak self] buffer in
-            self?.writeBuffer(buffer, from: .system)
-        }
-
-        try stream.addStreamOutput(output, type: SCStreamOutputType.audio, sampleHandlerQueue: DispatchQueue(label: "system-audio-queue"))
-
-        // No-op video output — required for audio to flow in audio-only mode.
-        let videoOutput = SystemVideoOutput()
-        try stream.addStreamOutput(videoOutput, type: SCStreamOutputType.screen, sampleHandlerQueue: DispatchQueue(label: "system-video-queue"))
-
-        try await stream.startCapture()
-        systemAudioStream = stream
-        systemAudioOutput = output
-        systemVideoOutput = videoOutput
-        logger.info("System audio capture started")
+        logger.info("System audio recording started (process tap, all apps)")
     }
 
     private func startSystemAudioCapture(window: SCWindow) async throws {
@@ -340,6 +319,8 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func stopSystemAudioCapture() async {
+        systemAudioTap?.stop()
+        systemAudioTap = nil
         if let stream = systemAudioStream {
             do { try await stream.stopCapture() } catch { logger.error("Stop capture error: \(error)") }
             systemAudioStream = nil
@@ -357,6 +338,8 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         writeLock.lock()
         defer { writeLock.unlock() }
         guard let audioFile else { return }
+        inputFrames[source, default: 0] += Int(buffer.frameLength)
+        inputRates[source] = buffer.format.sampleRate
 
         if loggedFirstBuffer.insert(source.rawValue).inserted {
             logger.info("First \(source.rawValue, privacy: .public) buffer: \(buffer.format.sampleRate, privacy: .public) Hz, \(buffer.format.channelCount, privacy: .public) ch, commonFormat \(buffer.format.commonFormat.rawValue, privacy: .public), \(buffer.frameLength, privacy: .public) frames")
@@ -400,6 +383,8 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         var cached = source == .mic ? micConverter : systemConverter
         if cached == nil || cached?.inputFormat != buffer.format {
             cached = AVAudioConverter(from: buffer.format, to: targetFormat)
+            // The tap is stereo: mix L+R into mono rather than keeping only the left channel.
+            cached?.downmix = true
             if source == .mic { micConverter = cached } else { systemConverter = cached }
         }
         guard let converter = cached else {
@@ -444,6 +429,13 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
             writeSamples(pendingSystem[...], to: audioFile)
         }
         pendingSystem.removeAll()
+        logger.info("Peak levels (0…1): mic \(self.peakLevels[.mic] ?? -1, privacy: .public), system \(self.peakLevels[.system] ?? -1, privacy: .public)")
+        // At real time, system seconds ≈ mic seconds. A mismatch means buffers are misread.
+        let secs = { (s: Source) in Double(self.inputFrames[s] ?? 0) / (self.inputRates[s] ?? 1) }
+        logger.info("Input audio: mic \(secs(.mic), format: .fixed(precision: 1), privacy: .public)s, system \(secs(.system), format: .fixed(precision: 1), privacy: .public)s @ \(self.inputRates[.system] ?? 0, privacy: .public) Hz")
+        inputFrames.removeAll()
+        peakLevels.removeAll()
+        sourceLevels.removeAll()
         audioFile = nil
     }
 

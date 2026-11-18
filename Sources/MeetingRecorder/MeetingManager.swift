@@ -15,6 +15,7 @@ final class MeetingManager: ObservableObject {
     let audioRecorder = AudioRecorder()
     let groqClient = GroqClient()
     let notionClient = NotionClient()
+    let googleClient = GoogleDocsClient()
 
     @AppStorage("groqAPIKey") var groqAPIKey: String = "" {
         didSet {
@@ -41,6 +42,16 @@ final class MeetingManager: ObservableObject {
         willSet { objectWillChange.send() }
         didSet { notionClient.databaseID = notionDatabaseID }
     }
+    // shortcut: Google refresh token lives in app preferences like the Notion token;
+    // move both to the Keychain once the app is signed with a stable identity.
+    @AppStorage("googleRefreshToken") var googleRefreshToken: String = "" {
+        willSet { objectWillChange.send() }
+        didSet { googleClient.refreshToken = googleRefreshToken }
+    }
+    @AppStorage("googleFolderID") var googleFolderID: String = "" {
+        didSet { googleClient.folderID = googleFolderID }
+    }
+    @Published private(set) var googleConnecting = false
     @AppStorage("autoDeleteAudio") var autoDeleteAudio: Bool = true
     @AppStorage("selectedLanguage") var selectedLanguageRaw: String = "auto"
     @AppStorage("recordMode") var recordModeRaw: String = "system"
@@ -64,6 +75,8 @@ final class MeetingManager: ObservableObject {
         !notionDatabaseID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    var googleConfigured: Bool { !googleRefreshToken.isEmpty }
+
     var markdownConfigured: Bool {
         !markdownFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -77,6 +90,7 @@ final class MeetingManager: ObservableObject {
     func isReady(_ destination: OutputDestination) -> Bool {
         switch destination {
         case .notion: return notionConfigured
+        case .googleDocs: return googleConfigured
         case .markdown: return markdownConfigured
         case .clipboard: return true
         }
@@ -180,6 +194,32 @@ final class MeetingManager: ObservableObject {
         }
     }
 
+    /// Browser sign-in; on success Google Docs becomes the destination.
+    func connectGoogle() {
+        guard !googleConnecting else { return }
+        googleConnecting = true
+        Task {
+            defer { googleConnecting = false }
+            do {
+                googleRefreshToken = try await googleClient.signIn()
+                googleFolderID = ""
+                outputDestination = .googleDocs
+            } catch {
+                logger.error("Google connect failed: \(error.localizedDescription, privacy: .public)")
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func disconnectGoogle() {
+        googleClient.revoke(googleRefreshToken)
+        googleRefreshToken = ""
+        googleFolderID = ""
+        if outputDestination == .googleDocs {
+            outputDestination = notionConfigured ? .notion : (markdownConfigured ? .markdown : .clipboard)
+        }
+    }
+
     func disconnectNotion() {
         notionDatabaseID = ""
         notionToken = ""
@@ -225,17 +265,6 @@ final class MeetingManager: ObservableObject {
     /// Section the Settings window scrolls to next time it shows.
     @Published var settingsFocus: SettingsSection?
 
-    // MARK: Screen & System Audio permission
-
-    /// No in-app permission card: macOS's own dialog covers the first ask. It only
-    /// appears once per app, so after one failed Record press we open the
-    /// Settings pane directly instead of leaving later presses silent.
-    private var askedForScreenCapture = false
-
-    func openScreenCapturePrivacySettings() {
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
-        NSWorkspace.shared.open(url)
-    }
 
     @Published var currentMeeting: Meeting?
     /// True between a successful capture start and stop. Published (unlike
@@ -270,6 +299,11 @@ final class MeetingManager: ObservableObject {
         notionClient.apiToken = notionToken
         notionClient.databaseID = notionDatabaseID
         notionConnected = notionConfigured
+        googleClient.refreshToken = googleRefreshToken
+        googleClient.folderID = googleFolderID
+        googleClient.onFolderCreated = { [weak self] id in
+            Task { @MainActor in self?.googleFolderID = id }
+        }
 
         loadHistory()
         migrateLegacyOutputs()
@@ -319,63 +353,25 @@ final class MeetingManager: ObservableObject {
         set { recordModeRaw = newValue.rawValue }
     }
 
-    private var pendingDisplay: SCDisplay?
-
     func startRecording() async {
         guard !isRecording, !isProcessing else { return }
         errorMessage = nil
         lastReport = nil
         micPermissionNeeded = false
-        // Item 39: entering startRecording is a fresh Record press. A stale
-        // pendingDisplay from a prior attempt (which may have been captured
-        // before a tccutil reset) must not bypass the request branch below.
-        pendingDisplay = nil
-        // NOTE: Mic permission (AVAudioApplication.requestRecordPermission) is
-        // requested inside AudioRecorder.startRecordingSystemAudio/startRecording,
-        // i.e. AFTER displayForRecording returns. The mic request is therefore
-        // sequenced after, not before, the screen-capture request — it cannot
-        // block or short-circuit CGRequestScreenCaptureAccess.
+        // System mode uses a Core Audio process tap: no Screen Recording permission,
+        // no display. macOS asks for "System Audio Recording" (and Microphone) itself.
 
         let meeting = Meeting(title: recordMode == .system ? "System Audio Meeting" : (selectedWindow?.title ?? "Meeting"))
         currentMeeting = meeting
         meetingHistory.insert(meeting, at: 0)
         saveHistory()
 
-        // System audio needs the display list — fetched only now, on Record.
-        var display: SCDisplay?
-        if recordMode == .system {
-            // Item 39: unconditionally enter displayForRecording so the
-            // CGRequestScreenCaptureAccess branch runs on every Record press
-            // when permission is not granted. DO NOT gate this on preflight here.
-            display = await displayForRecording()
-            guard display != nil else {
-                // DEBUG override: `defaults write com.ivanbayu.meetingrecorder
-                // debugBypassPermissions -bool true` enters the recording UI
-                // state anyway, for animation inspection — no capture engine
-                // starts, so Stop ends with the "No audio recorded" card.
-                if UserDefaults.standard.bool(forKey: "debugBypassPermissions") {
-                    meeting.status = .recording
-                    recordingStartedAt = Date()
-                    isRecording = true
-                    return
-                }
-                // Nothing was recorded: drop the placeholder so History has no stuck "Recording" rows.
-                meetingHistory.removeAll { $0.id == meeting.id }
-                currentMeeting = nil
-                saveHistory()
-                if askedForScreenCapture { openScreenCapturePrivacySettings() }
-                askedForScreenCapture = true
-                return
-            }
-        }
-
         let audioURL = tempDirectory.appendingPathComponent("\(meeting.id.uuidString).wav")
 
         do {
             meeting.status = .recording
-            if let display {
-                // Whole-display system audio: no window selection needed
-                try await audioRecorder.startRecordingSystemAudio(display: SCDisplayBox(display: display), outputURL: audioURL)
+            if recordMode == .system {
+                try await audioRecorder.startRecordingSystemAudio(outputURL: audioURL)
             } else {
                 guard let process = selectedProcess, let window = selectedWindow else {
                     errorMessage = "Please select a meeting window first"
@@ -396,44 +392,6 @@ final class MeetingManager: ObservableObject {
                 errorMessage = "Failed to start recording: \(error.localizedDescription)"
             }
             meeting.status = .failed
-        }
-    }
-
-    /// The display to capture, or nil when Screen & System Audio permission is
-    /// missing. Re-request only on a Record press so a reset TCC grant is
-    /// logged again and the user can enable the app in System Settings.
-    private func displayForRecording() async -> SCDisplay? {
-        // Item 39: cache the displays ONLY after a successful grant. A cached
-        // SCDisplay is meaningless without permission and must not short-circuit
-        // the request branch on a later press (e.g. after tccutil reset).
-        if let pendingDisplay, CGPreflightScreenCaptureAccess() {
-            return pendingDisplay
-        }
-        if !CGPreflightScreenCaptureAccess() {
-            // Request once per Record press. Don't fall through to the
-            // SCShareableContent fetch when not granted: without permission it
-            // fires a second, duplicate system prompt.
-            guard CGRequestScreenCaptureAccess() else {
-                logger.info("Screen capture permission not granted")
-                pendingDisplay = nil
-                return nil
-            }
-        }
-        do {
-            let box = try await fetchSCContentBox()
-            guard let display = box.displays.first else {
-                logger.info("No displays returned by SCShareableContent after permission check")
-                pendingDisplay = nil
-                return nil
-            }
-            pendingDisplay = display
-            return display
-        } catch {
-            // This is the definitive "not granted" signal — do not cache, so the
-            // next Record press re-enters CGRequestScreenCaptureAccess.
-            logger.info("Screen capture permission not granted: \(error)")
-            pendingDisplay = nil
-            return nil
         }
     }
 
@@ -531,7 +489,7 @@ final class MeetingManager: ObservableObject {
 
             // Delete the WAV only once the notes are durably stored somewhere
             // (clipboard alone doesn't count — it's ephemeral).
-            let durablySaved = report.notionURL != nil || report.markdownURL != nil
+            let durablySaved = report.notionURL != nil || report.markdownURL != nil || report.googleDocURL != nil
             if autoDeleteAudio, durablySaved, let audioURL = meeting.audioURL {
                 try? FileManager.default.removeItem(at: audioURL)
                 meeting.audioURL = nil
@@ -573,6 +531,16 @@ final class MeetingManager: ObservableObject {
                 report.failures.append("Notion: \(error.localizedDescription)")
             }
 
+        case .googleDocs:
+            // Same Markdown as the file/clipboard outputs; Drive converts it to a Doc.
+            switch await Self.sendToGoogle(client: googleClient, title: meeting.title, markdown: markdown) {
+            case .success(let url):
+                report.googleDocURL = url
+            case .failure(let error):
+                logger.error("Google Docs output failed: \(error)")
+                report.failures.append("Google Docs: \(error.localizedDescription)")
+            }
+
         case .markdown:
             let folder = MarkdownExporter.folderURL(from: markdownFolder)
             let fileName = MarkdownExporter.fileName(for: meeting)
@@ -592,6 +560,13 @@ final class MeetingManager: ObservableObject {
         client: NotionClient, meeting: Meeting, summary: MeetingSummary
     ) async -> Result<String, any Error> {
         do { return .success(try await client.createMeetingPage(meeting: meeting, summary: summary)) }
+        catch { return .failure(error) }
+    }
+
+    private nonisolated static func sendToGoogle(
+        client: GoogleDocsClient, title: String, markdown: String
+    ) async -> Result<URL, any Error> {
+        do { return .success(try await client.createDoc(title: title, markdown: markdown)) }
         catch { return .failure(error) }
     }
 
@@ -618,11 +593,6 @@ final class MeetingManager: ObservableObject {
     func dismissFailure() {
         errorMessage = nil
         if currentMeeting?.status == .failed { currentMeeting = nil }
-        // Item 39: a dismissed failure must not leave a stale pendingDisplay
-        // around that could short-circuit the next Record press's permission
-        // request. Clearing here (in addition to the guard in displayForRecording)
-        // is belt-and-braces.
-        pendingDisplay = nil
     }
 
     // MARK: - Window/Process Selection
@@ -684,6 +654,7 @@ final class MeetingManager: ObservableObject {
 /// Where finished notes go — exactly one at a time (radio).
 enum OutputDestination: String, CaseIterable, Identifiable, Sendable {
     case notion
+    case googleDocs
     case markdown
     case clipboard
 
@@ -692,6 +663,7 @@ enum OutputDestination: String, CaseIterable, Identifiable, Sendable {
     var title: String {
         switch self {
         case .notion: return "Notion"
+        case .googleDocs: return "Google Docs"
         case .markdown: return "Markdown file"
         case .clipboard: return "Copy to clipboard"
         }
@@ -700,6 +672,7 @@ enum OutputDestination: String, CaseIterable, Identifiable, Sendable {
     var systemImage: String {
         switch self {
         case .notion: return "n.square"
+        case .googleDocs: return "doc.richtext"
         case .markdown: return "doc.text"
         case .clipboard: return "doc.on.clipboard"
         }

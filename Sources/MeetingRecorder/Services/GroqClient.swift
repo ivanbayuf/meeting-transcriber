@@ -26,10 +26,57 @@ final class GroqClient: @unchecked Sendable {
             throw GroqError.missingAPIKey
         }
         
-        if audioDuration > 600 {
-            return try await transcribeChunked(audioURL: audioURL, language: language)
+        // Upload a 16 kbps AAC copy (~120 KB/min vs ~1.9 MB/min WAV): Groq's 25 MB cap
+        // becomes ~3.5 h instead of ~13 min. The WAV stays the source for Retry.
+        let upload: URL
+        do {
+            upload = try Self.compressForUpload(audioURL)
+            let compressedSize = (try? FileManager.default.attributesOfItem(atPath: upload.path)[.size] as? Int) ?? -1
+            logger.info("Compressed for upload: \(fileSize, privacy: .public) → \(compressedSize, privacy: .public) bytes")
+        } catch {
+            logger.error("AAC compression failed, uploading WAV: \(error, privacy: .public)")
+            upload = audioURL
         }
-        return try await transcribeSingle(audioURL: audioURL, language: language)
+        defer { if upload != audioURL { try? FileManager.default.removeItem(at: upload) } }
+
+        if audioDuration > 600 {
+            return try await transcribeChunked(audioURL: upload, language: language)
+        }
+        return try await transcribeSingle(audioURL: upload, language: language)
+    }
+
+    /// Re-encodes a recording as 16 kHz mono AAC at 16 kbps in a temp .m4a.
+    /// Speech stays fully intelligible to Whisper (checked against the WAV).
+    static func compressForUpload(_ source: URL) throws -> URL {
+        let input = try AVAudioFile(forReading: source)
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 16_000,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 16_000,
+            // Constant, so it is really 16 kbps (the default VBR lands ~19 kbps).
+            AVEncoderBitRateStrategyKey: AVAudioBitRateStrategy_Constant,
+        ]
+        do {
+            // Scoped so the writer is released (and the file finalised) before we return.
+            let writer = try AVAudioFile(forWriting: output, settings: settings,
+                                         commonFormat: input.processingFormat.commonFormat,
+                                         interleaved: input.processingFormat.isInterleaved)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: input.processingFormat, frameCapacity: 16_384) else {
+                throw GroqError.parsingError("Couldn't allocate audio buffer")
+            }
+            while input.framePosition < input.length {
+                try input.read(into: buffer)
+                if buffer.frameLength == 0 { break }
+                try writer.write(from: buffer)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: output)
+            throw error
+        }
+        return output
     }
     
     private func transcribeSingle(audioURL: URL, language: String?) async throws -> TranscriptionResult {
@@ -46,8 +93,10 @@ final class GroqClient: @unchecked Sendable {
         body.append("\(transcriptionModel)\r\n".data(using: .utf8)!)
         
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+        // Name/type follow the file: compressed .m4a normally, .wav on fallback.
+        let isM4A = audioURL.pathExtension.lowercased() == "m4a"
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.\(isM4A ? "m4a" : "wav")\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: \(isM4A ? "audio/mp4" : "audio/wav")\r\n\r\n".data(using: .utf8)!)
         body.append(try Data(contentsOf: audioURL))
         body.append("\r\n".data(using: .utf8)!)
         
@@ -198,18 +247,22 @@ final class GroqClient: @unchecked Sendable {
 You are an expert meeting summarizer. Output ONLY valid JSON matching this exact schema:
 {
   "title": "string - 3 to 7 word title naming what this meeting was about",
-  "summary": "string - what the meeting covered and what was concluded",
-  "keyDecisions": [{"decision": "string", "context": "string"}],
+  "summary": "string - the PURPOSE: one sentence on why this meeting happened / what it was for",
+  "keyPoints": ["string - one key insight per item, as a direct statement (no 'the speaker'/'they'): the substance of what was said (points, reasons, examples, answers) and what was concluded"],
+  "keyDecisions": [{"decision": "string - what was agreed", "context": "string - the one-line reason"}],
   "actionPoints": [{"task": "string", "owner": "string", "dueDate": "ISO8601 date string or null", "dueDateString": "original text or null"}],
-  "openQuestions": [{"question": "string", "context": "string"}],
+  "openQuestions": [{"question": "string - unresolved question OR risk/concern needing follow-up", "context": "string"}],
   "keyTopics": ["string"]
 }
 
 Rules:
+- The transcript has no speaker labels and who said what does not matter. Do NOT attribute points to anyone: never write "the speaker", "the facilitator", "the participant", "they said/describe/express". Write the insights as direct statements ("Missing someone is often missing who you were with them."). Names only for action-item owners.
+- Key points: be specific, not generic. Each point gives actual content ("Letting go is hard because it feels like losing part of your identity."), not just a topic ("Letting go was discussed."). One idea per point, at most ~25 words. A question that was answered becomes a point stating its answer. 3-8 points; longer meetings may use more.
 - Owner is ONLY what was explicitly stated. If not stated, use "unassigned".
 - Due date: if relative ("next Friday"), include ISO date AND original string. If none, both null.
-- Key decisions: only explicit decisions made, not discussion points.
-- Open questions: questions raised but not answered.
+- Key decisions: only explicit decisions made, not discussion points. Context = why, in one line.
+- Action points: include any agreed follow-up meeting or next step as a task (e.g. "Follow-up meeting" with its date).
+- Open questions: ONLY questions that were never answered later in the transcript. A question that got a reply is not open — put its answer in the summary instead.
 - Key topics: 3-7 main subjects discussed.
 - Title: specific to the content (e.g. "Q3 Budget Review with Finance"), in the transcript's language, no date, no quotes, no trailing period.
 """
@@ -234,6 +287,7 @@ Rules:
         
         struct SummaryJSON: Codable {
             let title: String?
+            let keyPoints: [String]?
             let summary: String
             let keyDecisions: [DecisionJSON]
             let actionPoints: [ActionPointJSON]
@@ -274,7 +328,8 @@ Rules:
             keyTopics: parsed.keyTopics,
             title: parsed.title
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"."))) }
-                .flatMap { $0.isEmpty ? nil : $0 }
+                .flatMap { $0.isEmpty ? nil : $0 },
+            keyPoints: parsed.keyPoints?.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         )
     }
     

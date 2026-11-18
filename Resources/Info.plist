@@ -2,17 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key>
-	<string>Meeting Transcriber</string>
 	<key>CFBundleDisplayName</key>
 	<string>Meeting Transcriber</string>
-	<!-- Kept from the old name so existing installs keep their settings and permissions. -->
-	<key>CFBundleIdentifier</key>
-	<string>com.ivanbayu.meetingrecorder</string>
 	<key>CFBundleExecutable</key>
 	<string>MeetingRecorder</string>
 	<key>CFBundleIconFile</key>
 	<string>MeetingRecorder</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.ivanbayu.meetingrecorder</string>
+	<key>CFBundleName</key>
+	<string>Meeting Transcriber</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -21,9 +20,9 @@
 	<string>1.0.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.2</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Meeting Transcriber records the audio your Mac plays (Meet, Teams, Zoom) so the transcript includes the other participants.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Meeting Transcriber captures your microphone during meetings so the transcript includes your voice.</string>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Meeting Transcriber captures the meeting app audio (Meet/Teams/Zoom) so the transcript includes other participants.</string>
 </dict>
 </plist>

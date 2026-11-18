@@ -51,13 +51,14 @@ struct OutputReport: Equatable, Sendable {
     let id = UUID()
     var notionURL: URL?
     var markdownURL: URL?
+    var googleDocURL: URL?
     var copied = false
     /// Human-readable failures of individual outputs, e.g. "Notion: HTTP 401".
     var failures: [String] = []
     /// No output was enabled — notes live only in History.
     var nothingEnabled = false
 
-    var savedSomewhere: Bool { notionURL != nil || markdownURL != nil || copied }
+    var savedSomewhere: Bool { notionURL != nil || markdownURL != nil || googleDocURL != nil || copied }
 }
 
 enum MeetingStatus: String, Codable, CaseIterable {
@@ -79,6 +80,8 @@ struct MeetingSummary: Codable {
     let keyTopics: [String]
     /// Short contextual title from Groq; optional so history saved before it decodes.
     var title: String? = nil
+    /// The insights as bullets (shown under the one-line summary); nil in older history.
+    var keyPoints: [String]? = nil
 }
 
 struct KeyDecision: Identifiable, Codable {
@@ -242,6 +245,8 @@ struct NotionBlock: Codable {
     let bulleted_list_item: NotionListItem?
     let toggle: NotionToggle?
     let children: [NotionBlock]?
+    /// Checkbox item (action items). Last + defaulted so existing builders don't change.
+    var to_do: NotionToDo? = nil
 }
 
 struct NotionHeading: Codable {
@@ -256,6 +261,12 @@ struct NotionParagraph: Codable {
 
 struct NotionListItem: Codable {
     let rich_text: [NotionRichText]
+    let color: String = "default"
+}
+
+struct NotionToDo: Codable {
+    let rich_text: [NotionRichText]
+    var checked: Bool = false
     let color: String = "default"
 }
 

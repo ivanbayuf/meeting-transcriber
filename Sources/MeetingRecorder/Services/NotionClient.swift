@@ -46,53 +46,31 @@ final class NotionClient: @unchecked Sendable {
         
         var children: [NotionBlock] = []
         
-        children.append(contentsOf: [
-            headingBlock("Summary"),
-            paragraphBlock(summary.summary.isEmpty ? "(No summary generated)" : summary.summary)
-        ])
-        
-        if !summary.keyDecisions.isEmpty {
-            children.append(headingBlock("Key Decisions"))
-            for decision in summary.keyDecisions {
-                var text = "\u{2022} \(decision.decision)"
-                if let context = decision.context, !context.isEmpty { text += " \u{2014} \(context)" }
-                children.append(bulletBlock(text))
-            }
+        // MoM layout. Every section is always present (with "None" when empty) so each
+        // page has the same shape — easier to scan and to process later.
+        func section(_ title: String, _ blocks: [NotionBlock]) {
+            children.append(headingBlock(title))
+            children.append(contentsOf: blocks.isEmpty ? [paragraphBlock("None")] : blocks)
         }
-        
-        if !summary.actionPoints.isEmpty {
-            children.append(headingBlock("Action Points"))
-            for ap in summary.actionPoints {
-                var text = "\u{2022} \(ap.task)"
-                if ap.isAssigned { text += " \u{2192} \(ap.owner)" }
-                if let dueString = ap.dueDateString, ap.dueDate == nil {
-                    text += " (due: \(dueString))"
-                } else if let due = ap.dueDate {
-                    text += " (due: \(dateFormatter.string(from: due)))"
-                } else if ap.isAssigned {
-                    text += " (no date)"
-                } else {
-                    text += " (unassigned, no date)"
-                }
-                children.append(bulletBlock(text))
-            }
-        }
-        
-        if !summary.openQuestions.isEmpty {
-            children.append(headingBlock("Open Questions"))
-            for q in summary.openQuestions {
-                var text = "\u{2022} \(q.question)"
-                if let context = q.context, !context.isEmpty { text += " \u{2014} \(context)" }
-                children.append(bulletBlock(text))
-            }
-        }
-        
-        if !summary.keyTopics.isEmpty {
-            children.append(headingBlock("Key Topics"))
-            for topic in summary.keyTopics {
-                children.append(bulletBlock("\u{2022} \(topic)"))
-            }
-        }
+
+        section("Purpose", summary.summary.isEmpty ? [] : [paragraphBlock(summary.summary)])
+        // Older history has no key points: fall back to nothing (Purpose holds its paragraph).
+        section("Key Points", (summary.keyPoints ?? []).map(bulletBlock))
+        section("Decisions", summary.keyDecisions.map { decision in
+            var text = decision.decision
+            if let reason = decision.context, !reason.isEmpty { text += " \u{2014} \(reason)" }
+            return bulletBlock(text)
+        })
+        section("Action Items", summary.actionPoints.map { ap in
+            let owner = ap.isAssigned && !ap.owner.isEmpty ? ap.owner : "Unassigned"
+            let due = ap.dueDate.map { dateFormatter.string(from: $0) } ?? ap.dueDateString ?? "no date"
+            return todoBlock("\(ap.task) \u{2014} \(owner) \u{00B7} \(due)")
+        })
+        section("Open Questions & Risks", summary.openQuestions.map { q in
+            var text = q.question
+            if let context = q.context, !context.isEmpty { text += " \u{2014} \(context)" }
+            return bulletBlock(text)
+        })
 
         // The transcript is deliberately NOT sent: the page holds only the
         // summary sections. (It also broke the 2,000-char rich_text limit.)
@@ -146,6 +124,10 @@ final class NotionClient: @unchecked Sendable {
         NotionBlock(type: "paragraph", heading_1: nil, heading_2: nil, heading_3: nil, paragraph: NotionParagraph(rich_text: [NotionRichText(text: NotionText(content: text))]), bulleted_list_item: nil, toggle: nil, children: nil)
     }
     
+    private func todoBlock(_ text: String) -> NotionBlock {
+        NotionBlock(type: "to_do", heading_1: nil, heading_2: nil, heading_3: nil, paragraph: nil, bulleted_list_item: nil, toggle: nil, children: nil, to_do: NotionToDo(rich_text: [NotionRichText(text: NotionText(content: text))]))
+    }
+
     private func bulletBlock(_ text: String) -> NotionBlock {
         NotionBlock(type: "bulleted_list_item", heading_1: nil, heading_2: nil, heading_3: nil, paragraph: nil, bulleted_list_item: NotionListItem(rich_text: [NotionRichText(text: NotionText(content: text))]), toggle: nil, children: nil)
     }

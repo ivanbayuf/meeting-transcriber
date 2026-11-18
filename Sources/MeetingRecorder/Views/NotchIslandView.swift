@@ -22,7 +22,7 @@ struct IslandMetrics: Equatable {
     /// 4 + 16 + 4 + (32 + 40 + 32 + 2×4) + 6 + 30 + 12 = 184 — zero slack, so
     /// any text-metric rounding ate the 12pt bottom inset. +8 leaves the
     /// Spacer room and keeps the bottom bar pinned exactly 12pt from the edge.
-    static let maxBodyHeight: CGFloat = 192
+    static let maxBodyHeight: CGFloat = 228 // 192 + one 36pt destination row (Google Docs)
     /// Expanded card width. Widened to 330 (item 27) so the "Send notes" section
     /// has room. Still clears "Window"/"Help" menus on a 14" display. Tune here.
     static let baseExpandedWidth: CGFloat = 330
@@ -691,6 +691,7 @@ struct NotchIslandView: View {
     private func caption(for destination: OutputDestination) -> String? {
         switch destination {
         case .markdown: return manager.markdownConfigured ? "Folder: \(manager.markdownFolderName)" : nil
+        case .googleDocs: return manager.googleConfigured ? "Folder: Meeting Notes" : nil
         case .notion, .clipboard: return nil
         }
     }
@@ -703,6 +704,11 @@ struct NotchIslandView: View {
         case .notion:
             guard !manager.notionConfigured else { return nil }
             return DestinationRow.Accessory(title: "Connect Notion") { model.onOpenSettings(.notion) }
+        case .googleDocs:
+            guard !manager.googleConfigured else { return nil }
+            return DestinationRow.Accessory(title: manager.googleConnecting ? "Waiting for browser…" : "Connect Google") {
+                manager.connectGoogle()
+            }
         case .markdown:
             // item 33: "Change…" → "Directory" (no ellipsis in copy once configured)
             return DestinationRow.Accessory(title: manager.markdownConfigured ? "Directory" : "Choose directory") {
@@ -843,6 +849,8 @@ struct NotchIslandView: View {
         var open: (url: URL, help: String)? = nil
         if let url = report?.notionURL {
             headline = "Saved to Notion"; open = (url, "Open in Notion")
+        } else if let url = report?.googleDocURL {
+            headline = "Saved to Google Docs"; open = (url, "Open in Google Docs")
         } else if let url = report?.markdownURL {
             headline = "Saved \(url.lastPathComponent)"; open = (url, "Open the Markdown file")
         } else if report?.copied == true {

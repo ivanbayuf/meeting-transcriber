@@ -73,7 +73,7 @@ struct SettingsView: View {
             } header: {
                 Text("Send notes to")
             } footer: {
-                Text("Notes go to one place: summary, decisions, action points, open questions, topics and the full transcript.")
+                Text("Notes go to one place: purpose, key points, decisions, action items, and open questions & risks. Markdown and clipboard also include the full transcript.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -199,6 +199,7 @@ private struct SettingsDestinationRow: View {
     private var caption: String? {
         switch destination {
         case .notion: return isReady ? "Connected — Meetings database" : nil
+        case .googleDocs: return isReady ? "Connected — Drive folder “Meeting Notes”" : nil
         case .markdown: return isReady ? "Folder: \(manager.markdownFolderName)" : nil
         case .clipboard: return nil
         }
@@ -216,6 +217,16 @@ private struct SettingsDestinationRow: View {
                     .fixedSize(horizontal: true, vertical: false)
             }
                 .controlSize(.small)
+        case .googleDocs where isReady:
+            Button("Disconnect", role: .destructive) { manager.disconnectGoogle() }
+                .controlSize(.small)
+        case .googleDocs:
+            Button { manager.connectGoogle() } label: {
+                Text(manager.googleConnecting ? "Waiting for browser…" : "Connect Google")
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+                .controlSize(.small)
+                .disabled(manager.googleConnecting)
         case .markdown:
             Button { manager.chooseMarkdownFolder() } label: {
                 Text(isReady ? "Directory" : "Choose directory")
