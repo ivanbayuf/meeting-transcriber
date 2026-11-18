@@ -52,6 +52,8 @@ final class MeetingManager: ObservableObject {
     }
     @Published private(set) var googleConnecting = false
     @AppStorage("autoDeleteAudio") var autoDeleteAudio: Bool = true
+    /// Off = capture only what the Mac plays (webinars, demos), not the room.
+    @AppStorage("recordMicrophone") var recordMicrophone: Bool = true
     @AppStorage("selectedLanguage") var selectedLanguageRaw: String = "auto"
 
     // MARK: Output — ONE destination (radio). Replaces outputNotion/Markdown/Clipboard.
@@ -363,7 +365,7 @@ final class MeetingManager: ObservableObject {
 
         do {
             meeting.status = .recording
-            try await audioRecorder.startRecordingSystemAudio(outputURL: audioURL)
+            try await audioRecorder.startRecordingSystemAudio(outputURL: audioURL, includeMic: recordMicrophone)
             meeting.audioURL = audioURL
             recordingStartedAt = Date()
             isRecording = true

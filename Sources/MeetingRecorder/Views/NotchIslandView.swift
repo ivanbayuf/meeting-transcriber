@@ -879,10 +879,13 @@ struct NotchIslandView: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.white)
                 Spacer(minLength: 8)
-                Text(destinationsLine)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.white.opacity(0.5))
-                    .lineLimit(1)
+                // "Saving to Notion…" already names the destination; don't repeat it.
+                if !manager.processingStage.hasPrefix("Saving") {
+                    Text(destinationsLine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.white.opacity(0.5))
+                        .lineLimit(1)
+                }
             }
         }
         .frame(height: 24)

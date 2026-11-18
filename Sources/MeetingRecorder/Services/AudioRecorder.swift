@@ -48,6 +48,9 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     private var systemConverter: AVAudioConverter?
     /// Converted system-audio samples waiting to be mixed into the next mic buffer.
     private var pendingSystem: [Int16] = []
+    /// False when recording system audio only: there is no mic clock to mix into,
+    /// so system buffers are written straight to the file.
+    private var mixWithMic = true
     private var loggedFirstBuffer: Set<String> = []
     private let fileFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
 
@@ -220,7 +223,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     // MARK: - System Audio
 
     /// Whole-system audio (every app) via a Core Audio process tap + the mic.
-    func startRecordingSystemAudio(outputURL: URL) async throws {
+    func startRecordingSystemAudio(outputURL: URL, includeMic: Bool = true) async throws {
         guard !isRecording else { throw AudioRecorderError.alreadyRecording }
 
         self.outputURL = outputURL
@@ -233,7 +236,8 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
         audioFile = try AVAudioFile(forWriting: outputURL, settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: true)
 
-        try await startMicrophoneCapture()
+        writeLock.withLock { mixWithMic = includeMic }
+        if includeMic { try await startMicrophoneCapture() }
         let tap = SystemAudioTap()
         do {
             try tap.start { [weak self] buffer in self?.writeBuffer(buffer, from: .system) }
@@ -288,6 +292,8 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         updateAudioLevel(samples: samples, count: count, source: source)
 
         switch source {
+        case .system where !mixWithMic:
+            writePCM(pcm, to: audioFile)
         case .system:
             pendingSystem.append(contentsOf: UnsafeBufferPointer(start: samples, count: count))
             // Mic not draining (stalled / device change): write the backlog on

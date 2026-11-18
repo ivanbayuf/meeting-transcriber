@@ -271,6 +271,5 @@ html,body{{margin:0;background:#ffffff}}
 
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "journey.svg").write_text(animated_svg())
     (OUT / "steps.html").write_text(steps_html())
-    print("wrote", OUT / "journey.svg", "and", OUT / "steps.html")
+    print("wrote", OUT / "steps.html")

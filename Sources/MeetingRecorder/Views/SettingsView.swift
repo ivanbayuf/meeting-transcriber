@@ -84,6 +84,8 @@ struct SettingsView: View {
             }
 
             Section("Recording") {
+                Toggle("Record my microphone", isOn: $manager.recordMicrophone)
+                    .help("Off records only what your Mac plays (the call, a webinar) — not your voice or the room.")
                 Toggle("Auto-delete audio once notes are saved", isOn: $manager.autoDeleteAudio)
                     .help("Deletes the recording after Notion or the Markdown file succeeds. Clipboard alone doesn't count.")
 

@@ -5,7 +5,7 @@ meeting, and get clean minutes in Notion, Google Docs, Markdown or your clipboar
 One free Groq key, nothing to download, no setup beyond that.
 
 <p align="center">
-  <img src="docs/preview/journey.svg" width="720" alt="Meeting Transcriber: pick where notes go and press record in the notch; it records the call and your mic, summarises long meetings in the background, lets you upload or discard, and saves clean meeting minutes to Notion.">
+  <img src="docs/preview/demo.gif" width="760" alt="Screen recording of Meeting Transcriber in the notch: recording a call with a live waveform, transcribing, saving to Notion, then the Send notes to panel with Notion, Google Docs, Markdown and clipboard.">
 </p>
 
 ## Why it's different
