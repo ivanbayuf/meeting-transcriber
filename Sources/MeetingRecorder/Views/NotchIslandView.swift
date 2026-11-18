@@ -103,18 +103,21 @@ struct IslandShape: Shape {
 // MARK: - Motion tokens
 
 enum IslandMotion {
-    /// Enter (expand): Emil's strong ease-out — cubic-bezier(0.23, 1, 0.32, 1),
-    /// drawer-tier 300ms. DEBUG: `defaults write com.ivanbayu.meetingrecorder
-    /// debugExpandDuration 0.4` (seconds, read live).
+    /// Enter (expand): spring WITH bounce — Ivan's call: 0.6s duration, 0.2
+    /// bounce (Emil's Apple-style spring, bounce kept in his 0.1–0.3 band).
+    /// DEBUG: `defaults write com.ivanbayu.meetingrecorder debugSpringDuration 0.6`
+    /// and `debugSpringBounce 0.2` (seconds / 0–1, read live, no rebuild).
     static var expand: Animation {
-        let d = UserDefaults.standard.object(forKey: "debugExpandDuration") as? Double ?? 0.3
-        return .timingCurve(0.23, 1, 0.32, 1, duration: d)
+        let d = UserDefaults.standard.object(forKey: "debugSpringDuration") as? Double ?? 0.6
+        let b = UserDefaults.standard.object(forKey: "debugSpringBounce") as? Double ?? 0.2
+        return .spring(duration: d, bounce: b)
     }
-    /// Exit (collapse): same curve, shorter — the user already decided to leave.
-    /// DEBUG: `defaults write com.ivanbayu.meetingrecorder debugCollapseDuration 0.15`.
+    /// Exit (collapse): same family, quicker — 0.4s, a touch less bounce.
+    /// DEBUG: `debugCollapseDuration 0.4` / `debugCollapseBounce 0.15`.
     static var collapse: Animation {
-        let d = UserDefaults.standard.object(forKey: "debugCollapseDuration") as? Double ?? 0.18
-        return .timingCurve(0.23, 1, 0.32, 1, duration: d)
+        let d = UserDefaults.standard.object(forKey: "debugCollapseDuration") as? Double ?? 0.4
+        let b = UserDefaults.standard.object(forKey: "debugCollapseBounce") as? Double ?? 0.15
+        return .spring(duration: d, bounce: b)
     }
     /// Record button mic ↔ stop swap: a binary state change, so a short
     /// scale+opacity crossfade on a slightly faster spring (~0.2s) with a
