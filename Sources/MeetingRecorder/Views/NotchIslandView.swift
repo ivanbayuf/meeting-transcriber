@@ -154,22 +154,29 @@ struct IslandEar: Shape {
 // MARK: - Motion tokens
 
 enum IslandMotion {
-    /// Enter (expand): spring WITH bounce — Ivan's final call: 0.3s, 0.3 bounce
-    /// (Emil's top of his 0.1–0.3 band). DEBUG: `defaults write
+    /// Enter (expand): springy on purpose — Ivan asked for a visible bounce in
+    /// both width and height: 0.4s, 0.38 bounce. DEBUG: `defaults write
     /// com.ivanbayu.meetingrecorder debugSpringDuration 0.3` / `debugSpringBounce 0.3`
     /// (seconds / 0–1, read live, no rebuild).
     static var expand: Animation {
-        let d = UserDefaults.standard.object(forKey: "debugSpringDuration") as? Double ?? 0.3
-        let b = UserDefaults.standard.object(forKey: "debugSpringBounce") as? Double ?? 0.3
+        let d = UserDefaults.standard.object(forKey: "debugSpringDuration") as? Double ?? 0.4
+        let b = UserDefaults.standard.object(forKey: "debugSpringBounce") as? Double ?? 0.38
         return .spring(duration: d, bounce: b)
     }
-    /// Exit (collapse): same family, quicker — 0.25s, a touch less bounce.
-    /// DEBUG: `debugCollapseDuration 0.25` / `debugCollapseBounce 0.15`.
+    /// Exit (collapse), and width changes while closed (recording starts or
+    /// stops): same family, a touch quicker and calmer — 0.35s, 0.28 bounce.
+    /// DEBUG: `debugCollapseDuration` / `debugCollapseBounce`.
     static var collapse: Animation {
-        let d = UserDefaults.standard.object(forKey: "debugCollapseDuration") as? Double ?? 0.25
-        let b = UserDefaults.standard.object(forKey: "debugCollapseBounce") as? Double ?? 0.15
+        let d = UserDefaults.standard.object(forKey: "debugCollapseDuration") as? Double ?? 0.35
+        let b = UserDefaults.standard.object(forKey: "debugCollapseBounce") as? Double ?? 0.28
         return .spring(duration: d, bounce: b)
     }
+    /// Width step of opening: quick, with a little bounce.
+    static let expandWidth = Animation.spring(duration: 0.3, bounce: 0.3)
+    /// Height step of closing: no bounce, since the body heads to 0.
+    static let collapseHeight = Animation.spring(duration: 0.28, bounce: 0)
+    /// Gap between the width and height steps.
+    static let stageDelay: Double = 0.063
     /// Record button mic ↔ stop swap: a binary state change, so a short
     /// scale+opacity crossfade on a slightly faster spring (~0.2s) with a
     /// small overshoot — re-taps feel instant.
@@ -259,6 +266,14 @@ final class IslandModel: ObservableObject {
     private var isHovering = false
     /// >0 while a modal we opened (folder picker) is up — don't collapse under it.
     private var holdCount = 0
+    /// Ask is mid-use (a question typed or waiting on its answer): don't fold
+    /// the card away under the user. Re-arms the close once it's done.
+    var askBusy = false {
+        didSet {
+            guard askBusy != oldValue, !askBusy, isExpanded, !isHovering else { return }
+            scheduleCollapse(after: Self.unattendedLinger)
+        }
+    }
     /// True during the flash's minimum on-screen time.
     private var flashHolding = false
     // hoverTask still used for collapse-grace scheduling; no longer used to expand (item 21).
@@ -371,7 +386,7 @@ final class IslandModel: ObservableObject {
         hoverTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self else { return }
-            guard !self.isHovering, self.holdCount == 0, !self.flashHolding else { return }
+            guard !self.isHovering, self.holdCount == 0, !self.flashHolding, !self.askBusy else { return }
             self.collapseNow()
         }
     }
@@ -404,8 +419,37 @@ struct NotchIslandView: View {
     @State private var showNudge = false
     @State private var nudgeTask: Task<Void, Never>?
 
+    /// The shape's width and height open one after the other (see stageShape).
+    @State private var widthOpen = false
+    @State private var heightOpen = false
+    @State private var stageTask: Task<Void, Never>?
+
+    /// Open: width first, then height with the bounce. Close: height first on
+    /// a no-bounce spring (a bounce toward 0 overshoots, clamps and springs
+    /// back — the stutter), then width. Reduce Motion: both snap together.
+    private func stageShape(open: Bool) {
+        stageTask?.cancel()
+        guard !reduceMotion else {
+            widthOpen = open
+            heightOpen = open
+            return
+        }
+        stageTask = Task { @MainActor in
+            if open {
+                withAnimation(IslandMotion.expandWidth) { widthOpen = true }
+                try? await Task.sleep(for: .seconds(IslandMotion.stageDelay))
+                guard !Task.isCancelled else { return }
+                withAnimation(IslandMotion.expand) { heightOpen = true }
+            } else {
+                withAnimation(IslandMotion.collapseHeight) { heightOpen = false }
+                try? await Task.sleep(for: .seconds(IslandMotion.stageDelay))
+                guard !Task.isCancelled else { return }
+                withAnimation(IslandMotion.collapse) { widthOpen = false }
+            }
+        }
+    }
+
     private struct LayoutKey: Equatable {
-        var open: Bool
         var pane: Pane
         var recording: Bool
         var showNudge: Bool
@@ -441,8 +485,12 @@ struct NotchIslandView: View {
             // One easing drives every layout change: Emil's strong ease-out,
         // longer on enter (expand), shorter on exit (collapse). Reduce Motion:
         // the shape snaps (no movement); content still crossfades.
+            // Pane, recording and nudge changes resize in place on one spring;
+            // opening and closing are staged separately (stageShape).
             .animation(reduceMotion ? nil : (open ? IslandMotion.expand : IslandMotion.collapse),
-                       value: LayoutKey(open: open, pane: content, recording: recording, showNudge: showNudge))
+                       value: LayoutKey(pane: content, recording: recording, showNudge: showNudge))
+            .onAppear { widthOpen = open; heightOpen = open }
+            .onChange(of: open) { _, isOpen in stageShape(open: isOpen) }
             // onChange, not onReceive: a publisher built inside body is re-subscribed on every
             // render and replays lastReport, so presentSuccess → re-render → replay looped forever.
             .onChange(of: manager.lastReport) { _, report in
@@ -462,6 +510,8 @@ struct NotchIslandView: View {
                     askViewModel.reset()
                     scheduleNudge()
                 } else {
+                    // Stop: the chat goes out with the meeting notes, so clear it here.
+                    askViewModel.reset()
                     nudgeTask?.cancel()
                     showNudge = false
                 }
@@ -486,9 +536,9 @@ struct NotchIslandView: View {
         // edge like the notch itself. Only the bottom radius changes.
         let shape = IslandShape(
             topRadius: 0,
-            bottomRadius: open ? IslandMetrics.expandedBottomRadius : IslandMetrics.collapsedBottomRadius
+            bottomRadius: heightOpen ? IslandMetrics.expandedBottomRadius : IslandMetrics.collapsedBottomRadius
         )
-        let width = open ? metrics.expandedWidth : metrics.collapsedWidth(recording: recording)
+        let width = widthOpen ? metrics.expandedWidth : metrics.collapsedWidth(recording: recording)
 
         return VStack(spacing: 0) {
             topRow(open: open, content: content, recording: recording)
@@ -524,9 +574,14 @@ struct NotchIslandView: View {
                 }
             }
             .frame(width: metrics.expandedWidth, alignment: .top)
-            .modifier(ClampedHeight(height: open ? bodyHeight(content) : 0))
+            .modifier(ClampedHeight(height: heightOpen ? bodyHeight(content) : 0))
         }
         .frame(width: width, alignment: .top)
+        // Ask / Notes / History: a gradient glow rising from the bottom edge.
+        .background(alignment: .bottom) {
+            BottomGlow(recorder: manager.audioRecorder, recording: recording,
+                       active: open && heightOpen && isTabbedPane(content))
+        }
         // Pure black in both states — no material — so it reads as the notch.
         .background(Color.black)
         .clipShape(shape)
@@ -746,7 +801,7 @@ struct NotchIslandView: View {
     /// controls stay reachable while asking.
     private var askPage: some View {
         AskPane(viewModel: askViewModel, manager: manager, reveal: reveal,
-                width: metrics.expandedWidth)
+                width: metrics.expandedWidth, onBusyChange: { model.askBusy = $0 })
     }
 
     // MARK: Tab strip (Notes / Ask) — segmented control
@@ -1352,6 +1407,82 @@ struct GlyphMorph: ViewModifier {
     }
 }
 
+/// Soft glow rising from the bottom of the open card (Ask, Notes, History):
+/// blurred colour circles along the bottom edge, after the voice
+/// transcriber's listening glow. Each drifts slowly on its own; while
+/// recording each swells with the meeting's sound (mic + system), by a
+/// slightly different amount so loud moments bloom unevenly.
+struct BottomGlow: View {
+    @ObservedObject var recorder: AudioRecorder
+    var recording: Bool
+    var active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Pink, purple, blue, light blue (RGB): each circle blends through these.
+    private static let palette: [(r: Double, g: Double, b: Double)] = [
+        (1.0, 0.43, 0.78), (0.69, 0.43, 0.95), (0.44, 0.53, 0.94), (0.56, 0.82, 1.0)
+    ]
+    /// Seconds per colour step — slow, so the change is felt more than seen.
+    private static let secondsPerColor = 10.0
+
+    /// Colour at a point in the loop (wraps), blended between neighbours.
+    private static func color(at position: Double) -> Color {
+        let n = Double(palette.count)
+        let p = (position.truncatingRemainder(dividingBy: n) + n).truncatingRemainder(dividingBy: n)
+        let a = palette[Int(p)], b = palette[(Int(p) + 1) % palette.count]
+        let f = p - p.rounded(.down)
+        return Color(red: a.r + (b.r - a.r) * f, green: a.g + (b.g - a.g) * f, blue: a.b + (b.b - a.b) * f)
+    }
+
+    private struct Blob {
+        let x: CGFloat        // starting centre, as a fraction of the width
+        let phase: Double
+        let speed: Double     // radians per second: ~10–25 s per drift cycle
+        let response: CGFloat // how much this blob swells with sound
+    }
+
+    private static let blobs = [
+        Blob(x: 0.12, phase: 0.0, speed: 0.31, response: 0.9),
+        Blob(x: 0.36, phase: 1.7, speed: 0.24, response: 1.2),
+        Blob(x: 0.62, phase: 3.1, speed: 0.38, response: 1.0),
+        Blob(x: 0.88, phase: 4.4, speed: 0.27, response: 0.8)
+    ]
+
+    var body: some View {
+        GeometryReader { geo in
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active || reduceMotion)) { context in
+                let t = reduceMotion ? 0 : context.date.timeIntervalSinceReferenceDate
+                let level = recording ? CGFloat(max(0, min(recorder.audioLevel, 1))) : 0
+                ZStack {
+                    ForEach(Self.blobs.indices, id: \.self) { i in
+                        let blob = Self.blobs[i]
+                        let drift = t * blob.speed + blob.phase
+                        let size = 110 * (1 + 0.1 * CGFloat(sin(drift * 0.8))) * (1 + 0.8 * level * blob.response)
+                        Circle()
+                            // Starts one colour apart from its neighbour, then drifts round the palette.
+                            .fill(Self.color(at: Double(i) + t / Self.secondsPerColor))
+                            .frame(width: size, height: size)
+                            // Centre just below the edge, so each circle rises from the bottom.
+                            // Wanders across the whole width (40–60 s per sweep, a different
+                            // pace per circle), so circles pass and trade places.
+                            .position(x: geo.size.width * (0.5 + 0.42 * CGFloat(sin(t * blob.speed * 0.4
+                                                                                     + asin(Double(blob.x - 0.5) / 0.42)))),
+                                      y: geo.size.height + size * 0.15 - 6 * CGFloat(cos(drift * 0.7)))
+                    }
+                }
+                .blur(radius: 30)
+                .opacity(0.5 + 0.3 * level)
+                .animation(.easeOut(duration: 0.2), value: level)
+            }
+        }
+        .frame(height: 200)
+        .opacity(active ? 1 : 0)
+        .animation(.easeOut(duration: 0.35), value: active)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 /// Five red bars driven by the live audio level (mic + system). Silence rests
 /// at a low floor; speech lifts the bars in a centre-weighted shape, with a
 /// little per-bar wobble so loud passages don't look like one block.
@@ -1552,14 +1683,24 @@ struct RadioDot: View {
         ZStack {
             Circle()
                 .strokeBorder(isOn ? Color.accentColor : Color.white.opacity(0.35), lineWidth: 1.5)
+                .animation(.easeOut(duration: 0.15), value: isOn)
+            // The dot springs in with a little overshoot and shrinks away when
+            // another row takes over.
             Circle()
                 .fill(Color.accentColor)
                 .padding(4)
-                .scaleEffect(isOn ? 1 : 0.5)
+                .scaleEffect(isOn ? 1 : 0.01)
                 .opacity(isOn ? 1 : 0)
+                .animation(isOn ? .spring(duration: 0.35, bounce: 0.5) : .easeIn(duration: 0.12), value: isOn)
         }
         .frame(width: 16, height: 16)
-        .animation(IslandMotion.press, value: isOn)
+        // Selecting gives the whole radio a quick press-and-release pop.
+        .keyframeAnimator(initialValue: 1.0, trigger: isOn) { content, scale in
+            content.scaleEffect(scale)
+        } keyframes: { _ in
+            CubicKeyframe(isOn ? 0.82 : 1.0, duration: 0.08)
+            SpringKeyframe(1.0, duration: 0.3, spring: .bouncy)
+        }
     }
 }
 

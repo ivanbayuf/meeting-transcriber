@@ -72,6 +72,15 @@ final class NotionClient: @unchecked Sendable {
             return bulletBlock(text)
         })
 
+        if let chat = meeting.askChat, !chat.isEmpty {
+            children.append(headingBlock("Questions Asked"))
+            for exchange in chat {
+                // Notion caps one rich_text at 2,000 chars.
+                children.append(bulletBlock(String("Q: \(exchange.question)".prefix(1_900))))
+                children.append(paragraphBlock(String(exchange.answer.prefix(1_900))))
+            }
+        }
+
         // The transcript is deliberately NOT sent: the page holds only the
         // summary sections. (It also broke the 2,000-char rich_text limit.)
 

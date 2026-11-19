@@ -371,12 +371,14 @@ final class MeetingManager: ObservableObject {
         let pipeline = LivePipeline(groq: groqClient,
                                     language: selectedLanguageRaw == "auto" ? nil : selectedLanguageRaw,
                                     meetingDate: meeting.startDate,
-                                    segmentDuration: TimeInterval(AudioRecorder.segmentSeconds),
+                                    summaryEvery: TimeInterval(AudioRecorder.segmentSeconds),
                                     onChunkTranscribed: { [weak self] in
                                         Task { @MainActor in self?.hasLiveTranscript = true }
                                     })
         livePipeline = pipeline
-        audioRecorder.onSegment = { url, index, isLast in pipeline.add(url, index: index, isLast: isLast) }
+        audioRecorder.onSegment = { url, index, start, isLast in
+            pipeline.add(url, index: index, start: start, isLast: isLast)
+        }
 
         do {
             meeting.status = .recording
@@ -534,14 +536,35 @@ final class MeetingManager: ObservableObject {
     /// finished meeting's stored transcript. Nil when there is nothing to ask
     /// about yet. Only the current meeting is askable in v1 — history meetings
     /// keep their transcripts, but Ask doesn't open them yet.
-    func askContext() async -> (transcript: String, segments: [TranscriptionSegment], date: Date,
+    /// `upToNow` also transcribes the chunk still recording, so the answer
+    /// covers everything said until the question was sent (one extra Whisper
+    /// call per question).
+    func askContext(upToNow: Bool = false) async -> (transcript: String, segments: [TranscriptionSegment], date: Date,
                                 summary: String?, coverage: String?)? {
         if isRecording, let pipeline = livePipeline {
-            let live = await pipeline.partialTranscript()
+            // Asking cuts the chunk so the latest audio is transcribed once;
+            // within a minute of the last cut, a throwaway snapshot covers it.
+            var live: (text: String, segments: [TranscriptionSegment])
+            var current = false
+            if upToNow, let index = audioRecorder.cutSegment(minSeconds: 60) {
+                await pipeline.waitForTranscript(index)
+                live = await pipeline.partialTranscript()
+                current = true
+            } else if upToNow, let snapshot = audioRecorder.snapshotCurrentSegment() {
+                live = await pipeline.transcriptIncluding(snapshot: snapshot.url, index: snapshot.index,
+                                                          start: snapshot.start)
+                current = true
+            } else {
+                live = await pipeline.partialTranscript()
+            }
             if !live.text.isEmpty {
                 let truncated = Self.isOverAskCap(transcript: live.text, segments: live.segments)
-                return (live.text, live.segments, currentMeeting?.startDate ?? Date(), nil,
-                        Self.coverageNote(recording: true, truncated: truncated))
+                let summary = await pipeline.partialSummaries()
+                    .compactMap { try? groqClient.parseSummaryJSON($0) }
+                    .compactMap(Self.summaryText).joined(separator: "\n\n")
+                return (live.text, live.segments, currentMeeting?.startDate ?? Date(),
+                        summary.isEmpty ? nil : summary,
+                        Self.coverageNote(recording: true, truncated: truncated, upToNow: current))
             }
         }
         if let meeting = pendingReview ?? currentMeeting,
@@ -569,7 +592,7 @@ final class MeetingManager: ObservableObject {
     /// context instead — the form stays usable while the meeting is still
     /// young, and only `suggestedQuestions` needs a transcript.
     func ask(question: String) async throws -> AskAnswer {
-        if let context = await askContext() {
+        if let context = await askContext(upToNow: true) {
             askCoverageNote = context.coverage
             return try await groqClient.ask(question: question, transcript: context.transcript,
                                             segments: context.segments, meetingDate: context.date,
@@ -604,15 +627,18 @@ final class MeetingManager: ObservableObject {
     /// What the Ask pane tells the user about coverage. Live answers never
     /// cover the chunk recording now; long meetings use a summary + the most
     /// relevant part instead of the whole transcript.
-    private static func coverageNote(recording: Bool, truncated: Bool) -> String? {
+    private static func coverageNote(recording: Bool, truncated: Bool, upToNow: Bool = false) -> String? {
         if recording, truncated {
-            return "Long meeting — answers use the parts most relevant to your question, from what's been transcribed so far."
+            return "Long meeting — answers use a summary of earlier parts, lines matching your question, and the last few minutes word for word."
+        }
+        if recording, upToNow {
+            return "Answers cover the meeting up to when you asked."
         }
         if recording {
             return "Answers cover what's been transcribed so far — the chunk recording now isn't in yet."
         }
         if truncated {
-            return "Long meeting — answers use the whole-meeting summary plus the parts most relevant to your question."
+            return "Long meeting — answers use the meeting summary, lines matching your question, and the end word for word."
         }
         return nil
     }

@@ -18,6 +18,8 @@ final class Meeting: Identifiable, Codable, @unchecked Sendable {
     var markdownFileURL: URL?
     /// True once the notes were placed on the clipboard.
     var clipboardCopied: Bool = false
+    /// Questions asked in Ask during the meeting, exported with the notes.
+    var askChat: [AskExchange]?
 
     init(id: UUID = UUID(), title: String, startDate: Date = Date(), status: MeetingStatus = .recording) {
         self.id = id
@@ -30,7 +32,7 @@ final class Meeting: Identifiable, Codable, @unchecked Sendable {
     // output fields) still decodes. Encoding stays synthesized.
     private enum CodingKeys: String, CodingKey {
         case id, startDate, endDate, title, transcript, segments, summary, audioURL, notionPageURL, status
-        case markdownFileURL, clipboardCopied
+        case markdownFileURL, clipboardCopied, askChat
     }
 
     init(from decoder: any Decoder) throws {
@@ -47,7 +49,13 @@ final class Meeting: Identifiable, Codable, @unchecked Sendable {
         status = try c.decode(MeetingStatus.self, forKey: .status)
         markdownFileURL = try c.decodeIfPresent(URL.self, forKey: .markdownFileURL)
         clipboardCopied = try c.decodeIfPresent(Bool.self, forKey: .clipboardCopied) ?? false
+        askChat = try c.decodeIfPresent([AskExchange].self, forKey: .askChat)
     }
+}
+
+struct AskExchange: Codable, Equatable {
+    let question: String
+    let answer: String
 }
 
 /// What happened when a finished meeting was sent to its destinations.

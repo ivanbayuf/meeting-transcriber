@@ -66,11 +66,15 @@ final class AskViewModel: ObservableObject {
         errorMessage = nil
         input = ""
         let turn = AskTurn(question: trimmed)
+        // Captured now: the chat clears on Stop, but an answer landing after
+        // that still belongs in this meeting's notes.
+        let meeting = manager.pendingReview ?? manager.currentMeeting
         withAnimation(IslandMotion.tabSwap) { turns.append(turn) }
         // Look the turn up by id when the reply lands: the chat may have been
         // reset meanwhile (a new recording), and a stale index would crash.
         do {
             let answer = try await manager.ask(question: trimmed)
+            meeting?.askChat = (meeting?.askChat ?? []) + [AskExchange(question: trimmed, answer: answer.answer)]
             if let i = turns.firstIndex(where: { $0.id == turn.id }) { turns[i].answer = answer }
             coverageNote = manager.askCoverageNote
         } catch {
@@ -83,6 +87,7 @@ final class AskViewModel: ObservableObject {
 /// One question and its reply (nil while waiting).
 struct AskTurn: Identifiable {
     let id = UUID()
+    let created = Date()
     let question: String
     var answer: AskAnswer?
     var error: String?
@@ -93,6 +98,8 @@ struct AskPane: View {
     @ObservedObject var manager: MeetingManager
     var reveal: Bool
     var width: CGFloat
+    /// True while a question is typed or waiting on its answer (keeps the card open).
+    var onBusyChange: (Bool) -> Void = { _ in }
 
     @FocusState private var inputFocused: Bool
     @State private var showSuggestions = false
@@ -108,7 +115,7 @@ struct AskPane: View {
 
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
-                    LazyVStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 10) {
                         ForEach(viewModel.turns) { turn in
                             turnView(turn).id(turn.id)
                         }
@@ -126,6 +133,7 @@ struct AskPane: View {
                 // Follow the conversation: new question, then its answer.
                 .onChange(of: viewModel.turns.count) { _, _ in scrollToEnd(proxy) }
                 .onChange(of: viewModel.isAsking) { _, _ in scrollToEnd(proxy) }
+                .onChange(of: viewModel.turns.last?.answer) { _, _ in scrollToEnd(proxy) }
                 .onAppear { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
             }
             .overlay {
@@ -152,6 +160,8 @@ struct AskPane: View {
         .padding(.top, 4)
         .padding(.bottom, 12)
         .frame(width: width, height: IslandMetrics.maxBodyHeight, alignment: .top)
+        .onChange(of: isBusy) { _, busy in onBusyChange(busy) }
+        .onDisappear { onBusyChange(false) }
         .onAppear {
             viewModel.bind(manager)
             if viewModel.suggestions.isEmpty {
@@ -159,6 +169,10 @@ struct AskPane: View {
             }
             focusInput()
         }
+    }
+
+    private var isBusy: Bool {
+        viewModel.isAsking || !viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func focusInput() {
@@ -270,21 +284,27 @@ struct AskPane: View {
     // MARK: Asking / answer
 
     private var askingRow: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("Thinking…")
-                .font(.system(size: 12))
-                .foregroundStyle(Color.white.opacity(0.6))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        TypingDots()
+            .padding(.vertical, 3)
+            .accessibilityLabel("Thinking")
     }
 
     private static let bottomID = "ask-bottom"
+    static let bubbleSpring = Animation.spring(duration: 0.35, bounce: 0.25)
+    /// The reply sharpens in: fade + slight blur, like the text settling.
+    static let replyIn = AnyTransition.opacity.combined(
+        with: .modifier(active: BlurIn(radius: 4), identity: BlurIn(radius: 0)))
 
     private func scrollToEnd(_ proxy: ScrollViewProxy) {
-        withAnimation(IslandMotion.tabSwap) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+        // Next runloop: the new bubble must be laid out first, or this scrolls
+        // to the old bottom and leaves the bubble half hidden.
+        DispatchQueue.main.async {
+            withAnimation(IslandMotion.tabSwap) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+        }
     }
+
+    /// Only a just-sent turn pops in; old bubbles don't replay on tab switches.
+    private func isNew(_ turn: AskTurn) -> Bool { Date().timeIntervalSince(turn.created) < 1 }
 
     /// Your question on the right, the reply on the left.
     private func turnView(_ turn: AskTurn) -> some View {
@@ -298,26 +318,29 @@ struct AskPane: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .background(Color(red: 0.04, green: 0.47, blue: 1.0), in: BubbleShape(mine: true))
+                    .modifier(BubbleAppear(anchor: .bottomTrailing, delay: 0, animate: isNew(turn)))
             }
             HStack {
-                Group {
+                ZStack(alignment: .topLeading) {
                     if let answer = turn.answer {
-                        answerView(answer)
+                        answerView(answer).transition(Self.replyIn)
                     } else if let error = turn.error {
                         Text(error)
                             .font(.system(size: 12))
                             .foregroundStyle(Color.red.opacity(0.85))
+                            .transition(Self.replyIn)
                     } else {
-                        askingRow
+                        askingRow.transition(.opacity)
                     }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
                 .background(Color.white.opacity(0.07), in: BubbleShape(mine: false))
+                .animation(Self.bubbleSpring, value: turn.answer != nil || turn.error != nil)
+                .modifier(BubbleAppear(anchor: .bottomLeading, delay: 0.12, animate: isNew(turn)))
                 Spacer(minLength: 24)
             }
         }
-        .transition(.opacity.combined(with: .offset(y: 6)))
     }
 
     private func answerView(_ answer: AskAnswer) -> some View {
@@ -357,9 +380,11 @@ struct AskPane: View {
     // MARK: Input
 
     private var inputRow: some View {
-        HStack(spacing: 8) {
+        let canSend = !viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !viewModel.isAsking
+        return HStack(spacing: 6) {
             TextField("Ask about the meeting…", text: $viewModel.input)
-                .font(.system(size: 13))
+                .font(.system(size: 12))
                 .foregroundStyle(Color.white)
                 .textFieldStyle(.plain)
                 .focused($inputFocused)
@@ -368,26 +393,73 @@ struct AskPane: View {
             Button {
                 Task { await viewModel.ask(viewModel.input) }
             } label: {
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.85))
-                    .frame(width: 28, height: 28)
-                    .background(Color.white.opacity(0.12))
-                    .clipShape(Circle())
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(canSend ? 1 : 0.45))
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(canSend
+                        ? Color(red: 0.04, green: 0.47, blue: 1.0)
+                        : Color.white.opacity(0.1)))
+                    .scaleEffect(canSend ? 1 : 0.86)
                     .contentShape(Circle())
             }
             .buttonStyle(PressScaleStyle())
-            .disabled(viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                      || viewModel.isAsking)
+            .disabled(!canSend)
             .accessibilityLabel("Send question")
         }
-        .padding(.horizontal, 10)
-        .frame(height: 38)
-        .background(Color.white.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10)
-            .stroke(Color.white.opacity(inputFocused ? 0.35 : 0.12), lineWidth: 1))
+        .padding(.leading, 12)
+        .padding(.trailing, 4)
+        .frame(height: 30)
+        .background(Capsule().fill(Color.white.opacity(inputFocused ? 0.11 : 0.08)))
+        .overlay(Capsule().stroke(Color.white.opacity(inputFocused ? 0.3 : 0.1), lineWidth: 1))
+        .animation(Self.bubbleSpring, value: canSend)
+        .animation(IslandMotion.contentIn, value: inputFocused)
         .padding(.horizontal, 8)
+    }
+}
+
+/// A bubble grows out of its speaker's corner with a small bounce.
+private struct BubbleAppear: ViewModifier {
+    var anchor: UnitPoint
+    var delay: Double
+    var animate: Bool
+    @State private var shown = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(shown ? 1 : 0)
+            .scaleEffect(shown || reduceMotion ? 1 : 0.8, anchor: anchor)
+            .offset(y: shown || reduceMotion ? 0 : 6)
+            .onAppear {
+                guard animate else { shown = true; return }
+                withAnimation(AskPane.bubbleSpring.delay(delay)) { shown = true }
+            }
+    }
+}
+
+private struct BlurIn: ViewModifier {
+    var radius: CGFloat
+    func body(content: Content) -> some View { content.blur(radius: radius) }
+}
+
+/// Three dots rising in turn while the answer is on its way.
+private struct TypingDots: View {
+    @State private var phase = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .fill(Color.white.opacity(0.6))
+                    .frame(width: 5, height: 5)
+                    .offset(y: phase && !reduceMotion ? -3 : 0)
+                    .opacity(phase ? 1 : 0.4)
+                    .animation(.easeInOut(duration: 0.45).repeatForever().delay(Double(i) * 0.15), value: phase)
+            }
+        }
+        .onAppear { phase = true }
     }
 }
 

@@ -63,8 +63,10 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     // MARK: Live chunks
     /// Set before starting to get the recording in ~10-min WAV chunks as it happens,
     /// so they can be transcribed/summarised in the background. Called on an audio
-    /// queue with (chunk file or nil if the last chunk is empty, index, isLast).
-    var onSegment: ((URL?, Int, Bool) -> Void)?
+    /// queue with (chunk file or nil if the last chunk is empty, index, start
+    /// in seconds of meeting time, isLast). Chunks are cut every 10 min or
+    /// early by `cutSegment`, so their lengths vary.
+    var onSegment: ((URL?, Int, TimeInterval, Bool) -> Void)?
     /// 10 minutes at 16 kHz. DEBUG: `defaults write com.ivanbayu.meetingrecorder
     /// debugSegmentSeconds 30` makes short test recordings exercise the live path.
     static var segmentSeconds: Int {
@@ -74,6 +76,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     private var segmentFile: AVAudioFile?        // guarded by writeLock
     private var segmentIndex = 0                 // guarded by writeLock
     private var segmentFramesWritten = 0         // guarded by writeLock
+    private var segmentStartFrame = 0            // guarded by writeLock
 
     var outputURL_current: URL? { outputURL }
 
@@ -96,6 +99,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         segmentFile = nil
         segmentIndex = 0
         segmentFramesWritten = 0
+        segmentStartFrame = 0
         writeLock.unlock()
     }
 
@@ -493,12 +497,42 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Copy of the chunk being recorded right now (a readable WAV), so Ask can
+    /// cover the last few minutes without waiting for the 10-min rotation.
+    /// Nil when nothing has been written to the current chunk yet. The caller
+    /// deletes the file.
+    func snapshotCurrentSegment() -> (url: URL, index: Int, start: TimeInterval)? {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        guard let source = segmentFile?.url, segmentFramesWritten > 0 else { return nil }
+        let copy = source.deletingPathExtension().appendingPathExtension("snapshot-\(UUID().uuidString).wav")
+        do { try FileManager.default.copyItem(at: source, to: copy) } catch {
+            logger.error("Chunk snapshot failed: \(error, privacy: .public)")
+            return nil
+        }
+        Self.repairWAVHeader(at: copy) // the open file's header still says 0 bytes
+        return (copy, segmentIndex, Double(segmentStartFrame) / 16_000)
+    }
+
+    /// Ends the current chunk now (Ask wants the latest audio transcribed),
+    /// if it holds at least `minSeconds`; the 10-min clock restarts from
+    /// here. Returns the closed chunk's index, or nil if it was too short.
+    func cutSegment(minSeconds: Int) -> Int? {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        guard segmentFile != nil, segmentFramesWritten >= 16_000 * minSeconds else { return nil }
+        let index = segmentIndex
+        closeSegment(isLast: false)
+        return index
+    }
+
     /// Caller holds `writeLock`.
     private func closeSegment(isLast: Bool) {
         let url = segmentFile?.url
         segmentFile = nil // releasing the AVAudioFile finalises the WAV header
-        onSegment?(url, segmentIndex, isLast)
+        onSegment?(url, segmentIndex, Double(segmentStartFrame) / 16_000, isLast)
         segmentIndex += 1
+        segmentStartFrame += segmentFramesWritten
         segmentFramesWritten = 0
     }
 }

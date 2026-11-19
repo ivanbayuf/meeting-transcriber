@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 /// Ask about this meeting: answers grounded ONLY in the transcript.
 ///
@@ -73,7 +74,7 @@ extension GroqClient {
         let (sourced, truncated) = Self.sourcedTranscript(question: question, transcript: transcript,
                                                            segments: segments, summary: summary)
         let note = truncated
-            ? "Note: this meeting is longer than one call can hold. The transcript below is the part most relevant to the question (with a summary of the whole meeting above it, when shown). If the answer isn't in these excerpts or the summary, say so."
+            ? "Note: to save tokens, older parts of this meeting are given as a summary plus the earlier lines that match the question; the most recent part is word for word. If the answer isn't in these, say so."
             : ""
         let json: String
         do {
@@ -123,7 +124,7 @@ extension GroqClient {
         let (sourced, truncated) = Self.sourcedTranscript(question: nil, transcript: transcript,
                                                            segments: segments, summary: summary)
         let note = truncated
-            ? "Note: this meeting is longer than one call can hold. The transcript below is the most recent part (with a summary of the whole meeting above it, when shown)."
+            ? "Note: older parts of this meeting are given as a summary; the most recent part is word for word."
             : ""
         let json: String
         do {
@@ -177,9 +178,14 @@ extension GroqClient {
         return AskAnswer(answer: decoded.answer, sources: [])
     }
 
-    /// Max verbatim transcript characters in one Ask call — the free Groq
-    /// per-minute token budget caps the context.
-    static let maxAskChars = 24_000
+    /// Up to this many transcript characters (~2k tokens), Ask sends the
+    /// whole transcript; past it, the compact context below. Keeps every
+    /// question about the same cost however long the meeting runs.
+    static let maxAskChars = 8_000
+    /// Word-for-word tail sent with the compact context (~the last 10 min).
+    private static let recentChars = 6_000
+    /// Older lines matching the question, sent with the compact context.
+    private static let matchChars = 1_500
     /// Cap for the whole-meeting summary block sent with a truncated transcript.
     private static let maxSummaryChars = 3_000
 
@@ -189,7 +195,7 @@ extension GroqClient {
     /// are presented in. Segments are stored in time order, so position ==
     /// time order for timestamped meetings; for a plain transcript (time -1
     /// throughout) it is the only order there is.
-    private struct SourcedUnit {
+    struct SourcedUnit {
         let time: TimeInterval
         let line: String
         let position: Int
@@ -197,11 +203,9 @@ extension GroqClient {
 
     /// Transcript lines prefixed with their segment start time, so the model
     /// can cite moments. Returns the text to send and whether it was cut down:
-    /// a meeting longer than `maxAskChars` (~30–40 min of speech) can't fit one
-    /// call, so the verbatim block becomes the part most relevant to the
-    /// question (keyword overlap; most recent part when nothing matches, or
-    /// when suggesting questions) and the whole-meeting summary covers the
-    /// rest. Nothing is silently dropped to the first 24,000 characters.
+    /// past `maxAskChars` the context becomes the summary of the meeting so
+    /// far, the earlier lines that match the question (with their neighbours),
+    /// and the most recent part word for word.
     private static func sourcedTranscript(question: String?, transcript: String,
                                           segments: [TranscriptionSegment]?,
                                           summary: String?) -> (text: String, truncated: Bool) {
@@ -217,57 +221,68 @@ extension GroqClient {
         }
         let full = units.map(\.line).joined(separator: "\n")
         guard full.count > maxAskChars else { return (full, false) }
+
+        var recentStart = units.count
+        var count = 0
+        while recentStart > 0, count + units[recentStart - 1].line.count + 1 <= recentChars {
+            recentStart -= 1
+            count += units[recentStart].line.count + 1
+        }
+        if recentStart == units.count { recentStart -= 1 } // one huge line: still send it
+        let older = Array(units[..<recentStart])
+        let matches = relevantUnits(older, question: question, maxChars: matchChars)
+
         var blocks: [String] = []
         if let summary, !summary.isEmpty {
-            blocks.append("Meeting summary (whole meeting):\n\(summary.prefix(maxSummaryChars))")
+            blocks.append("Summary of the meeting so far:\n\(summary.prefix(maxSummaryChars))")
         }
-        blocks.append(selectUnits(units, question: question, maxChars: maxAskChars)
-            .map(\.line).joined(separator: "\n"))
+        if !matches.isEmpty {
+            blocks.append("Earlier lines matching the question:\n" + matches.map(\.line).joined(separator: "\n"))
+        }
+        blocks.append("Most recent part, word for word:\n"
+                      + units[recentStart...].map(\.line).joined(separator: "\n"))
         return (blocks.joined(separator: "\n\n"), true)
     }
 
-    /// Picks the verbatim units that fit `maxChars`: highest keyword overlap
-    /// with the question first (ties broken by recency), returned in
-    /// transcript order. No question, or nothing matches → the most recent
-    /// units. Ordered by position, not time: a plain transcript has no times
-    /// (all -1), so time order would leave the picks in score order and the
-    /// "most recent" fallback would take the oldest lines instead.
-    private static func selectUnits(_ units: [SourcedUnit], question: String?,
-                                    maxChars: Int) -> [SourcedUnit] {
-        let words = questionWords(question)
-        let scored = units.map { unit -> (unit: SourcedUnit, score: Int) in
-            let lower = unit.line.lowercased()
-            return (unit, words.filter { lower.contains($0) }.count)
+    /// Lines that match the question, best first, each with the line before
+    /// and after it for context; returned in transcript order within
+    /// `maxChars`. Works in any language: words come from NLTokenizer, and a
+    /// word that appears in many lines (filler like "the", "itu", "です")
+    /// weighs almost nothing, so no stopword lists are needed.
+    static func relevantUnits(_ units: [SourcedUnit], question: String?, maxChars: Int) -> [SourcedUnit] {
+        let asked = Set(words(question ?? ""))
+        guard !asked.isEmpty, !units.isEmpty else { return [] }
+        let lineWords = units.map { Set(words($0.line)) }
+        // Whole word, or word start for longer words ("belajar" finds "belajarnya").
+        func has(_ set: Set<String>, _ word: String) -> Bool {
+            set.contains(word) || (word.count >= 4 && set.contains { $0.hasPrefix(word) })
         }
-        let ordered = scored.sorted {
-            if $0.score != $1.score { return $0.score > $1.score }
-            return $0.unit.position > $1.unit.position
+        var weight: [String: Double] = [:]
+        for word in asked {
+            let lines = lineWords.filter { has($0, word) }.count
+            if lines > 0 { weight[word] = log(Double(units.count + 1) / Double(lines)) }
         }
-        let pool = ordered.contains { $0.score > 0 } ? ordered.filter { $0.score > 0 } : ordered
-        var chosen: [SourcedUnit] = []
+        let scores = lineWords.map { set in weight.reduce(0) { $0 + (has(set, $1.key) ? $1.value : 0) } }
+        let best = scores.indices.filter { scores[$0] > 0 }
+            .sorted { scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 > $1 }
+        var chosen = Set<Int>()
         var count = 0
-        for entry in pool {
-            let len = entry.unit.line.count + 1
-            if !chosen.isEmpty, count + len > maxChars { break }
-            chosen.append(entry.unit)
-            count += len
+        outer: for index in best {
+            for i in [index, index - 1, index + 1] where units.indices.contains(i) && !chosen.contains(i) {
+                let length = units[i].line.count + 1
+                if count + length > maxChars { break outer }
+                chosen.insert(i)
+                count += length
+            }
         }
-        return chosen.sorted { $0.position < $1.position }
+        return chosen.sorted().map { units[$0] }
     }
 
-    /// Significant words from the question for retrieval: lowercased, ≥3
-    /// letters, minus filler words that appear in nearly every question or
-    /// meeting.
-    private static func questionWords(_ question: String?) -> [String] {
-        guard let question else { return [] }
-        let stopwords: Set<String> = ["what", "when", "where", "who", "whom", "whose", "which", "why", "how",
-            "did", "does", "was", "were", "are", "been", "being", "the", "and", "for", "with", "about",
-            "this", "that", "these", "those", "there", "here", "from", "into", "have", "has", "had",
-            "can", "could", "would", "should", "will", "say", "said", "tell", "ask", "asked", "meeting",
-            "discuss", "discussed", "talk", "talked", "mention", "mentioned", "anything", "something"]
-        let words = question.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { $0.count >= 3 && !stopwords.contains($0) }
-        return Array(Set(words))
+    private static func words(_ text: String) -> [String] {
+        let tokenizer = NLTokenizer(unit: .word)
+        let lower = text.lowercased()
+        tokenizer.string = lower
+        return tokenizer.tokens(for: lower.startIndex..<lower.endIndex).map { String(lower[$0]) }
     }
 
     /// Plain transcript (no Whisper segments — older history): sentence-sized

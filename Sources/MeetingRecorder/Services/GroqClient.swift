@@ -396,7 +396,7 @@ Rules:
 - Title: specific to the content (e.g. "Q3 Budget Review with Finance"), in the transcript's language, no date, no quotes, no trailing period.
 """
     
-    private func parseSummaryJSON(_ jsonString: String) throws -> MeetingSummary {
+    func parseSummaryJSON(_ jsonString: String) throws -> MeetingSummary {
         let cleaned = jsonString
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")

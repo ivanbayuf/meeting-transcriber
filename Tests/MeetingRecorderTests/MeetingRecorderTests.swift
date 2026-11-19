@@ -151,4 +151,19 @@ final class MeetingRecorderTests: XCTestCase {
         let seconds = Double(out.length) / out.fileFormat.sampleRate
         XCTAssertEqual(seconds, 30.0, accuracy: 0.15)
     }
+
+    func testRelevantUnitsWeighsRareWordsInAnyLanguage() {
+        let lines = ["aku mau ke cafe itu", "itu belajar besok", "susu ultra itu enak",
+                     "terus itu apa", "itu lagi", "nggak itu juga"]
+        let units = lines.enumerated().map { GroqClient.SourcedUnit(time: Double($0.offset), line: $0.element, position: $0.offset) }
+        // "itu" is in every line, so only the rare "susu ultra" decides; neighbours come along.
+        let picked = GroqClient.relevantUnits(units, question: "susu ultra itu", maxChars: 40)
+        XCTAssertEqual(picked.first?.line, "itu belajar besok")
+        XCTAssertTrue(picked.map(\.line).contains("susu ultra itu enak"))
+        XCTAssertFalse(picked.map(\.line).contains("nggak itu juga"))
+        // Word start: "belajar" finds "belajarnya"; no words in common, nothing picked.
+        let more = units + [GroqClient.SourcedUnit(time: 6, line: "belajarnya susah", position: 6)]
+        XCTAssertTrue(GroqClient.relevantUnits(more, question: "belajar", maxChars: 200).contains { $0.line == "belajarnya susah" })
+        XCTAssertTrue(GroqClient.relevantUnits(units, question: "kucing", maxChars: 200).isEmpty)
+    }
 }

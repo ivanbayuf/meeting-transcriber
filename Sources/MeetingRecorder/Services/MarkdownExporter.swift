@@ -56,6 +56,17 @@ enum MarkdownExporter {
         }))
         lines.append("")
 
+        if let chat = meeting.askChat, !chat.isEmpty {
+            lines.append("## Questions asked")
+            lines.append("")
+            for exchange in chat {
+                lines.append("**Q: \(exchange.question)**")
+                lines.append("")
+                lines.append(exchange.answer)
+                lines.append("")
+            }
+        }
+
         lines.append("## Transcript")
         lines.append("")
         let transcript = meeting.transcript?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
