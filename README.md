@@ -1,15 +1,22 @@
 # Meeting Transcriber
 
-**The simplest meeting notes app for macOS.** Press record in the notch, have your
+**The simplest meeting notes app for macOS — now with Ask.** Press record in the notch, have your
 meeting, and get clean minutes in Notion, Google Docs, Markdown or your clipboard.
-One free Groq key, nothing to download, no setup beyond that.
+Then ask your meeting anything: answers come from the transcript, with the exact
+quotes and times they rest on. One free Groq key, nothing to download, no setup beyond that.
 
 <p align="center">
-  <img src="docs/preview/demo.gif" width="760" alt="Screen recording of Meeting Transcriber in the notch: recording a call with a live waveform, transcribing, saving to Notion, then the Send notes to panel with Notion, Google Docs, Markdown and clipboard.">
+  <img src="docs/preview/ask-demo.gif" width="760" alt="Ask about this meeting: the island expands from the notch, the Suggestions list opens, a question is asked, and the answer streams in with its sources and times in the meeting.">
 </p>
+
+*New in 1.4.0 — Ask about this meeting, live during the call and after.*
 
 ## Why it's different
 
+- **Ask your meeting anything.** During the call or after it, ask a question and get an
+  answer grounded in the transcript — with the verbatim quotes it rests on and their
+  time in the meeting, so you can check it in one click. No more re-listening to find
+  who said what, and no more guessing whether the AI made it up.
 - **Lives in the notch.** A black island under your menu bar: tap the mic to record,
   watch the waveform move with the conversation, hover it to stop.
 - **Notes go where you already work.** Notion, Google Docs, a Markdown folder or the
@@ -42,6 +49,14 @@ One free Groq key, nothing to download, no setup beyond that.
 4. **Notes ready** — check the title and what's in it, then Upload or Discard.
 5. **Saved** — one click opens the page.
 6. **Clean minutes** — purpose, key points, decisions, action items you can tick off.
+7. **Ask about it** — open Ask and question the meeting: what was decided, who owns what,
+   what was actually said — answered from the transcript, with quotes and times.
+
+The whole flow, from record to saved minutes:
+
+<p align="center">
+  <img src="docs/preview/demo.gif" width="760" alt="Screen recording of Meeting Transcriber in the notch: recording a call with a live waveform, transcribing, saving to Notion, then the Send notes to panel with Notion, Google Docs, Markdown and clipboard.">
+</p>
 
 ## Install
 
