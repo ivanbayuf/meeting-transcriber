@@ -579,9 +579,13 @@ final class MeetingManager: ObservableObject {
         return try await groqClient.askAboutApp(question: question, context: appContextText())
     }
 
-    /// Three suggested questions drawn from what was actually discussed.
+    /// Suggested questions. With a transcript they are generated from what
+    /// was actually said; without one they are the generic meeting questions
+    /// (context, goal, timeline, …) — the button stays available from the
+    /// start, and tapping one fills the form, which answers from the app
+    /// context until the transcript is ready.
     func suggestedQuestions() async throws -> [String] {
-        guard let context = await askContext() else { throw AskError.noTranscript }
+        guard let context = await askContext() else { return GroqClient.genericSuggestions }
         askCoverageNote = context.coverage
         return try await groqClient.suggestedQuestions(transcript: context.transcript,
                                                        segments: context.segments,

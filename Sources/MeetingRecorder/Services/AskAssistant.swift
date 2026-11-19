@@ -101,6 +101,21 @@ extension GroqClient {
             sources: decoded.sources.map { AskSource(time: $0.time, quote: $0.quote) })
     }
 
+    /// Generic questions shown when there is no transcript yet: the "What
+    /// should I ask?" button stays available from the start, and these give
+    /// the user the meeting questions worth asking — context, goal, timeline,
+    /// and the rest. They are fixed, not model-generated: there is nothing
+    /// to generate from yet. Once a transcript exists, `suggestedQuestions`
+    /// generates from it instead.
+    static let genericSuggestions = [
+        "What is the context of this meeting?",
+        "What is the goal of this meeting?",
+        "What is the timeline?",
+        "Who is involved and what are their roles?",
+        "What decisions were made?",
+        "What are the next steps?"
+    ]
+
     /// Three short questions a participant would plausibly ask about this
     /// meeting, drawn from what was actually discussed.
     func suggestedQuestions(transcript: String, segments: [TranscriptionSegment]?,

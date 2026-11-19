@@ -196,9 +196,9 @@ struct AskPane: View {
                 .contentShape(RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(PressScaleStyle())
-            // Suggestions need a transcript to suggest from; the form below
-            // stays usable without one.
-            .disabled(viewModel.isLoadingSuggestions || !manager.canAsk)
+            // Always available: with a transcript it suggests from what was
+            // said; without one it shows the generic meeting questions.
+            .disabled(viewModel.isLoadingSuggestions)
 
             ForEach(viewModel.suggestions, id: \.self) { suggestion in
                 Button {
