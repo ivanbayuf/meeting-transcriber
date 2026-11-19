@@ -4,6 +4,32 @@ import CryptoKit
 @testable import MeetingRecorder
 
 final class MeetingRecorderTests: XCTestCase {
+    /// On speakers, the mic is turned down while the other side talks (and briefly after).
+    func testEchoGateDucksMicOnlyWhileSystemAudioPlays() {
+        var hold = 0
+        let silence = [Int16](repeating: 0, count: 1600)[...]
+        let speech = [Int16](repeating: 8_000, count: 1600)[...] // ≈ -12 dBFS
+        var mic = [Int16](repeating: 10_000, count: 1600)
+
+        mic.withUnsafeMutableBufferPointer { AudioRecorder.gateEcho(mic: $0.baseAddress!, count: 1600, system: silence, hold: &hold) }
+        XCTAssertEqual(mic[0], 10_000, "others silent: your voice untouched")
+
+        mic.withUnsafeMutableBufferPointer { AudioRecorder.gateEcho(mic: $0.baseAddress!, count: 1600, system: speech, hold: &hold) }
+        XCTAssertEqual(mic[0], 1_000, "others talking: mic down to 10%")
+
+        // Still within the 0.3 s (4,800-frame) hold after they stop.
+        mic = [Int16](repeating: 10_000, count: 1600)
+        mic.withUnsafeMutableBufferPointer { AudioRecorder.gateEcho(mic: $0.baseAddress!, count: 1600, system: silence, hold: &hold) }
+        XCTAssertEqual(mic[0], 1_000, "echo tail: still ducked")
+
+        // Hold runs out → back to full level.
+        for _ in 0..<3 {
+            mic = [Int16](repeating: 10_000, count: 1600)
+            mic.withUnsafeMutableBufferPointer { AudioRecorder.gateEcho(mic: $0.baseAddress!, count: 1600, system: silence, hold: &hold) }
+        }
+        XCTAssertEqual(mic[0], 10_000, "after the hold: full level again")
+    }
+
     /// Long transcripts must split into parts under the token budget without losing text.
     func testTranscriptPartsRespectBudgetAndKeepAllText() {
         func strip(_ s: String) -> String { s.filter { !$0.isWhitespace } }

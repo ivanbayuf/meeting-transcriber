@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreAudio
 import os.log
 
 // MARK: - Audio Recorder Service
@@ -18,7 +19,6 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     private var outputURL: URL?
     private var audioFile: AVAudioFile?
     private var micEngine: AVAudioEngine?
-    private var micMixer: AVAudioMixerNode?
     private var systemAudioTap: SystemAudioTap?
     private var recordingStartTime: Date?
     private var timer: Timer?
@@ -51,6 +51,10 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     /// False when recording system audio only: there is no mic clock to mix into,
     /// so system buffers are written straight to the file.
     private var mixWithMic = true
+    /// On speakers the mic re-records the meeting (echo). When true, the mic is
+    /// turned down while the system tap is playing speech. Guarded by writeLock.
+    private var echoGate = false
+    private var echoGateHold = 0
     private var loggedFirstBuffer: Set<String> = []
     private let fileFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
 
@@ -143,24 +147,11 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
 
         let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-
-        let mixer = AVAudioMixerNode()
-        engine.attach(mixer)
-
-        // Convert to 16kHz mono via mixer
-        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false) else {
-            throw AudioRecorderError.fileCreationFailed
-        }
-        engine.connect(inputNode, to: mixer, format: inputFormat)
-        engine.connect(mixer, to: engine.mainMixerNode, format: targetFormat)
-        // The tap reads `mixer` (upstream); muting the main mixer only stops
-        // the mic from being monitored out of the speakers.
-        engine.mainMixerNode.outputVolume = 0
-
-        // 1024 frames ≈ 64 ms at 16 kHz (was 4096 ≈ 256 ms): fast enough for a live waveform.
-        mixer.installTap(onBus: 0, bufferSize: 1024, format: targetFormat) { [weak self] buffer, _ in
+        // Tap the mic in its native format; writeBuffer's converter makes it 16 kHz mono
+        // (same path as system audio). A mixer node doing the 48→16 kHz resample here
+        // delivered pure silence with the built-in 48 kHz mic.
+        // 1024 frames ≈ 21 ms at 48 kHz: frequent enough for a live waveform.
+        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             guard let self = self else { return }
             self.writeBuffer(buffer, from: .mic)
             self.updateMicLevel(from: buffer)
@@ -168,15 +159,42 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
 
         try engine.start()
         micEngine = engine
-        micMixer = mixer
         logger.info("Microphone capture started")
     }
 
     private func stopMicrophoneCapture() {
-        micMixer?.removeTap(onBus: 0)
+        micEngine?.inputNode.removeTap(onBus: 0)
         micEngine?.stop()
         micEngine = nil
-        micMixer = nil
+    }
+
+    /// Echo gate (speakers only): while the system tap carries sound, the mic hears it
+    /// again from the speakers. Turn the mic down to 10% then, and for 0.3 s after
+    /// (the room's echo tail). Cost: your voice is quieter while talking over others.
+    static func gateEcho(mic: UnsafeMutablePointer<Int16>, count: Int, system: ArraySlice<Int16>, hold: inout Int) {
+        var sum: Float = 0
+        for s in system { let v = Float(s) / 32768; sum += v * v }
+        let systemRMS = system.isEmpty ? 0 : sqrtf(sum / Float(system.count))
+        if systemRMS > 0.01 { hold = 16_000 * 3 / 10 } // ~ -40 dBFS = someone is talking
+        guard hold > 0 else { return }
+        for i in 0..<count { mic[i] = Int16(Float(mic[i]) * 0.1) }
+        hold = max(0, hold - count)
+    }
+
+    /// shortcut: "speakers" = default output's name contains "Speaker" (MacBook/external
+    /// speakers); HDMI monitor audio counts as earphones — add a toggle if that matters.
+    static func outputIsSpeakers() -> Bool {
+        var device = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr else { return false }
+        var name: Unmanaged<CFString>?
+        size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        address.mSelector = kAudioObjectPropertyName
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &name) == noErr, let name else { return false }
+        return (name.takeRetainedValue() as String).localizedCaseInsensitiveContains("speaker")
     }
 
     /// Per-source RMS (before mixing) → publishes the louder one, ~20 Hz. Caller holds writeLock.
@@ -236,7 +254,9 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
         audioFile = try AVAudioFile(forWriting: outputURL, settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: true)
 
-        writeLock.withLock { mixWithMic = includeMic }
+        let speakers = includeMic && Self.outputIsSpeakers()
+        writeLock.withLock { mixWithMic = includeMic; echoGate = speakers; echoGateHold = 0 }
+        logger.info("Output on speakers: \(speakers, privacy: .public) → echo gate \(speakers ? "on" : "off", privacy: .public)")
         if includeMic { try await startMicrophoneCapture() }
         let tap = SystemAudioTap()
         do {
@@ -305,6 +325,9 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
             }
         case .mic:
             let mixCount = min(count, pendingSystem.count)
+            if echoGate {
+                Self.gateEcho(mic: samples, count: count, system: pendingSystem[..<mixCount], hold: &echoGateHold)
+            }
             for i in 0..<mixCount {
                 samples[i] = Int16(clamping: Int32(samples[i]) + Int32(pendingSystem[i]))
             }
