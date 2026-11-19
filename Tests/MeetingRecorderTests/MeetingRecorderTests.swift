@@ -4,6 +4,30 @@ import CryptoKit
 @testable import MeetingRecorder
 
 final class MeetingRecorderTests: XCTestCase {
+    /// Quiet speech is boosted, loud speech never clips, silence doesn't pump the gain.
+    func testMicGainBoostsQuietSpeechWithoutClipping() {
+        func rms(_ a: [Int16]) -> Float { sqrtf(a.reduce(0) { $0 + pow(Float($1) / 32768, 2) } / Float(a.count)) }
+        func tone(_ amp: Float) -> [Int16] { (0..<1600).map { Int16(amp * 32767 * sinf(Float($0) * 0.2)) } }
+        var gain: Float = 1
+
+        // Quiet speech (~ -40 dBFS): after a few seconds it's several times louder.
+        var quiet = tone(0.014)
+        for _ in 0..<40 { quiet = tone(0.014); quiet.withUnsafeMutableBufferPointer { AudioRecorder.applyMicGain(samples: $0.baseAddress!, count: 1600, gain: &gain) } }
+        XCTAssertGreaterThan(rms(quiet), rms(tone(0.014)) * 4, "quiet voice is boosted")
+        XCTAssertLessThanOrEqual(gain, 8)
+
+        // Silence afterwards doesn't push the gain higher.
+        let before = gain
+        var silence = [Int16](repeating: 0, count: 1600)
+        silence.withUnsafeMutableBufferPointer { AudioRecorder.applyMicGain(samples: $0.baseAddress!, count: 1600, gain: &gain) }
+        XCTAssertEqual(gain, before)
+
+        // A sudden loud sound is not amplified into clipping.
+        var loud = tone(0.9)
+        loud.withUnsafeMutableBufferPointer { AudioRecorder.applyMicGain(samples: $0.baseAddress!, count: 1600, gain: &gain) }
+        XCTAssertLessThan(loud.map { abs(Int($0)) }.max()!, 32_000, "no clipping")
+    }
+
     /// A recording cut off by a crash has a header claiming 0 bytes; repair restores it.
     func testRepairWAVHeaderRecoversCrashedRecording() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".wav")

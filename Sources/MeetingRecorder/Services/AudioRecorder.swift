@@ -55,6 +55,8 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     /// turned down while the system tap is playing speech. Guarded by writeLock.
     private var echoGate = false
     private var echoGateHold = 0
+    /// Automatic mic boost, carried across buffers. Guarded by writeLock.
+    private var micGain: Float = 1
     private var loggedFirstBuffer: Set<String> = []
     private let fileFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
 
@@ -193,6 +195,28 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Automatic mic boost: brings quiet speech (low input volume, far from the
+    /// laptop) up to a normal level, independent of the system input slider.
+    /// Gain only moves while there's speech, is capped at 8×, and drops at once
+    /// if a buffer would clip.
+    static func applyMicGain(samples: UnsafeMutablePointer<Int16>, count: Int, gain: inout Float) {
+        guard count > 0 else { return }
+        var sum: Float = 0, peak: Float = 0
+        for i in 0..<count {
+            let v = Float(samples[i]) / 32768
+            sum += v * v
+            peak = max(peak, abs(v))
+        }
+        let rms = sqrtf(sum / Float(count))
+        if rms > 0.003 { // speech, not room noise: steer toward ~-20 dBFS
+            let desired = min(8, max(1, 0.1 / rms))
+            gain += (desired - gain) * (desired < gain ? 0.5 : 0.05) // fast down, slow up
+        }
+        if peak * gain > 0.95 { gain = max(1, 0.95 / peak) } // never clip
+        guard gain > 1.001 else { return }
+        for i in 0..<count { samples[i] = Int16(clamping: Int(Float(samples[i]) * gain)) }
+    }
+
     /// Echo gate (speakers only): while the system tap carries sound, the mic hears it
     /// again from the speakers. Turn the mic down to 10% then, and for 0.3 s after
     /// (the room's echo tail). Cost: your voice is quieter while talking over others.
@@ -229,8 +253,10 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
             let s = Float(samples[i]) / 32768
             sumSquares += s * s
         }
-        // Same mapping as the mic meter: ~0.25 RMS (loud speech) fills the bar.
-        sourceLevels[source] = min(sqrtf(sumSquares / Float(count)) * 4, 1)
+        // Loudness in dB, like hearing: -50 dBFS (room hush) = 0, -10 dBFS (loud) = 1.
+        // Linear RMS left normal speech at ~10% of the waveform, so it looked flat.
+        let rms = sqrtf(sumSquares / Float(count))
+        sourceLevels[source] = rms > 0 ? min(max((20 * log10f(rms) + 50) / 40, 0), 1) : 0
         peakLevels[source] = max(peakLevels[source] ?? 0, sourceLevels[source] ?? 0)
         let now = CFAbsoluteTimeGetCurrent()
         guard now - lastAudioLevelUpdate >= 0.05 else { return }
@@ -280,7 +306,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         audioFile = try AVAudioFile(forWriting: outputURL, settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: true)
 
         let speakers = includeMic && Self.outputIsSpeakers()
-        writeLock.withLock { mixWithMic = includeMic; echoGate = speakers; echoGateHold = 0 }
+        writeLock.withLock { mixWithMic = includeMic; echoGate = speakers; echoGateHold = 0; micGain = 1 }
         logger.info("Output on speakers: \(speakers, privacy: .public) → echo gate \(speakers ? "on" : "off", privacy: .public)")
         if includeMic { try await startMicrophoneCapture() }
         let tap = SystemAudioTap()
@@ -334,6 +360,7 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
         guard pcm.frameLength > 0, let samples = pcm.int16ChannelData?[0] else { return }
         let count = Int(pcm.frameLength)
+        if source == .mic { Self.applyMicGain(samples: samples, count: count, gain: &micGain) }
         updateAudioLevel(samples: samples, count: count, source: source)
 
         switch source {

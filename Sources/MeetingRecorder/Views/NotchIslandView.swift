@@ -1167,8 +1167,7 @@ struct RecordingWaveform: View {
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active || reduceMotion)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
-            // sqrt lifts quiet speech so normal talking visibly moves the bars.
-            let lvl = CGFloat(sqrt(max(0, min(level, 1))))
+            let lvl = CGFloat(max(0, min(level, 1))) // already perceptual (dB) from the recorder
             HStack(alignment: .center, spacing: 2) {
                 ForEach(0..<5, id: \.self) { i in
                     let wobble = reduceMotion ? 1 : 0.8 + 0.2 * CGFloat(sin(t * 9 + Double(i) * 1.7))
