@@ -32,10 +32,11 @@ struct IslandMetrics: Equatable {
     /// under it). The right wing always holds Ask (sparkles) beside the
     /// chevron — or beside the live timer while recording — so it is 24 + 4 +
     /// 24 + insets idle, and the timer's width while recording. The left wing
-    /// balances it: mic + "Record" label idle, stop square + live waveform
-    /// while recording. Wings are symmetric, so each is sized for its wider
-    /// side: idle is set by the "Record" label, recording by sparkles + timer.
-    static let idleWing: CGFloat = 76
+    /// balances it: mic + "Rec." label idle, stop square + "Stop" + live
+    /// waveform while recording. Wings are symmetric, so each is sized for
+    /// its wider side: idle is set by mic + "Rec." (the right wing needs the
+    /// same room), recording by sparkles + timer.
+    static let idleWing: CGFloat = 64
     /// While recording the wings widen just enough for the live timer.
     /// Fits the timer box: inset 4 + 7 + dot 6 + 5 + "00:00" ≈36 + 7 ≈ 65 —
     /// plus the Ask button beside it: + 4 + 24.
@@ -565,14 +566,14 @@ struct NotchIslandView: View {
     // MARK: Top row
 
     /// Icon-only on the right, labelled on the left: record on the left wing
-    /// (mic + "Record" idle, stop square + live waveform while recording);
-    /// on the right wing, the Ask button (sparkles, icon only) sits beside
-    /// the chevron — or beside the live timer while collapsed and recording.
-    /// On a notched screen the camera housing sits in the Spacer between the
-    /// wings. Ask is ALWAYS in the row — before the first chunk is
-    /// transcribed it is visible but disabled (see `askEnabled`), so the pill
-    /// never changes width for it; the left wing's label / waveform is what
-    /// balances the two-icon right wing.
+    /// (mic + "Rec." idle, stop square + "Stop" + live waveform while
+    /// recording); on the right wing, the Ask button (sparkles, icon only)
+    /// sits beside the chevron — or beside the live timer while collapsed
+    /// and recording. On a notched screen the camera housing sits in the
+    /// Spacer between the wings. Ask is ALWAYS tappable (except while a
+    /// pipeline or blocker holds the card, or with no Groq key) — before the
+    /// first chunk is transcribed the pane opens and says so, instead of the
+    /// button sitting there dead with no explanation.
     ///
     /// Each interactive target scales on hover; island-level continuous hover
     /// still controls collapse grace.
@@ -612,21 +613,21 @@ struct NotchIslandView: View {
         .padding(.horizontal, metrics.controlEdgeInset)
     }
 
-    /// Ask is usable whenever there is a transcript to ask about — the live
-    /// partial while recording, or the finished meeting's text — and never
-    /// while a pipeline or blocker holds the card.
+    /// Ask is usable whenever there is a Groq key and no pipeline or blocker
+    /// holds the card. It is NOT gated on having a transcript: the button
+    /// stays tappable and the pane itself explains when there is nothing to
+    /// ask about yet — a disabled button gives the user no way to find out why.
     private func askEnabled(content: Pane) -> Bool {
         guard groqKeyValid else { return false }
         switch content {
         case .processing, .review, .failure: return false
-        default: return manager.canAsk
+        default: return true
         }
     }
 
     /// Icon-only Ask button: sparkles in the same 24pt box as the chevron,
     /// directly to its left. Opens the Ask pane; the pane's own back chevron
-    /// (or the main chevron) closes it. Always visible; disabled (with a
-    /// tooltip saying why) until there is a transcript to ask about.
+    /// (or the main chevron) closes it.
     private func askButton(content: Pane) -> some View {
         Button { model.openAsk() } label: {
             Image(systemName: "sparkles")
@@ -637,8 +638,7 @@ struct NotchIslandView: View {
         }
         .buttonStyle(PressScaleStyle())
         .disabled(!askEnabled(content: content))
-        .help(askEnabled(content: content) ? "Ask about this meeting"
-              : "Ask unlocks once the first part is transcribed")
+        .help("Ask about this meeting")
         .accessibilityLabel("Ask about this meeting")
     }
 
@@ -1175,10 +1175,12 @@ struct GroqOnboardingCard: View {
 /// Item 19: NO red circle background. Glyph is RED while recording, WHITE while idle.
 /// Item 38: the parent topRow applies the scale hover affordance.
 /// Item 13: Disabled (greyed) when groqKeyValid is false.
-/// Balance: the control carries a neighbour that matches the right wing's
-/// two icons — a "Record" label beside the mic while idle, the live waveform
-/// beside the stop square while recording (no more hover-to-reveal the stop;
-/// both are always visible). Processing shows only the spinner.
+/// Balance: the control carries a label that matches the right wing's two
+/// icons — "Rec." beside the mic while idle, "Stop" beside the stop square
+/// while recording, with the live waveform after it (no more hover-to-reveal
+/// the stop; everything is always visible). Spacing is 8pt between icon,
+/// label and waveform so nothing crowds the notch. Processing shows only
+/// the spinner.
 struct RecordControlButton: View {
     var isRecording: Bool
     var isProcessing: Bool
@@ -1196,7 +1198,7 @@ struct RecordControlButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 // The icon morphs mic → stop (and back) with the existing
                 // scale+blur crossfade, on one spring.
                 ZStack {
@@ -1215,13 +1217,18 @@ struct RecordControlButton: View {
                 }
                 .frame(width: IslandMetrics.controlSize, height: IslandMetrics.controlSize)
                 .animation(reduceMotion ? IslandMotion.reducedFade : .spring(duration: 0.3, bounce: 0.2), value: glyph)
-                // Idle: "Record" beside the mic. Recording: the live waveform
-                // beside the stop square. The two swap with a short fade.
+                // Idle: "Rec." beside the mic. Recording: "Stop" beside the
+                // stop square, then the live waveform. The label swaps with
+                // a short fade; the waveform animates on its own clock.
                 if isRecording {
+                    Text("Stop")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.85))
+                        .transition(.opacity)
                     RecordingWaveform(level: recorder.audioLevel, active: true)
                         .transition(.opacity)
                 } else if !isProcessing {
-                    Text("Record")
+                    Text("Rec.")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Color.white.opacity(0.85))
                         .transition(.opacity)

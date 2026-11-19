@@ -62,7 +62,7 @@ final class AskViewModel: ObservableObject {
 
 struct AskPane: View {
     @ObservedObject var viewModel: AskViewModel
-    var manager: MeetingManager
+    @ObservedObject var manager: MeetingManager
     var reveal: Bool
     var width: CGFloat
     var bottomBar: AnyView
@@ -160,6 +160,15 @@ struct AskPane: View {
 
     private var suggestionsView: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // The button stays tappable before anything is transcribed, so
+            // the pane says so itself instead of leaving a dead button.
+            if !manager.canAsk {
+                Text("Nothing to ask about yet — record for a bit first. Ask unlocks once the first part is transcribed.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.white.opacity(0.45))
+                    .padding(.top, 2)
+            }
+
             Button {
                 Task { await viewModel.loadSuggestions() }
             } label: {

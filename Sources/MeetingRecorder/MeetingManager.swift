@@ -555,9 +555,9 @@ final class MeetingManager: ObservableObject {
     }
 
     /// True when Ask has anything to work with: a finished meeting's text, or
-    /// the live partial once the first chunk has been transcribed. False in
-    /// the first minutes of a recording (no finished chunk yet) — the button
-    /// stays hidden until then instead of failing every question.
+    /// the live partial once the first chunk has been transcribed. The Ask
+    /// pane uses this for its empty state ("nothing to ask about yet") — the
+    /// button itself stays tappable so the user can always open it and see why.
     var canAsk: Bool {
         if let meeting = pendingReview ?? currentMeeting,
            let text = meeting.transcript, !text.isEmpty { return true }
