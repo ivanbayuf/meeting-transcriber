@@ -26,21 +26,13 @@ struct IslandMetrics: Equatable {
     /// Expanded card width. Widened to 330 (item 27) so the "Send notes" section
     /// has room. Still clears "Window"/"Help" menus on a 14" display. Tune here.
     static let baseExpandedWidth: CGFloat = 330
-    /// Collapsed = icon-only, except the record control carries a label.
-    /// Each wing holds the top-row controls for its side; on a notched screen
-    /// the wings sit either side of the camera housing (nothing can draw
-    /// under it). The right wing always holds Ask (sparkles) beside the
-    /// chevron — or beside the live timer while recording — so it is 24 + 4 +
-    /// 24 + insets idle, and the timer's width while recording. The left wing
-    /// balances it: mic + "Rec." label idle, stop square + "Stop" + live
-    /// waveform while recording. Wings are symmetric, so each is sized for
-    /// its wider side: idle is set by mic + "Rec." (the right wing needs the
-    /// same room), recording by sparkles + timer.
-    static let idleWing: CGFloat = 64
+    /// Collapsed = icon-only. Each wing holds one 24pt control (record left,
+    /// chevron right) → 80pt total without a notch. On a notched screen the
+    /// wings sit either side of the camera housing (nothing can draw under it).
+    static let idleWing: CGFloat = 40
     /// While recording the wings widen just enough for the live timer.
-    /// Fits the timer box: inset 4 + 7 + dot 6 + 5 + "00:00" ≈36 + 7 ≈ 65 —
-    /// plus the Ask button beside it: + 4 + 24.
-    static let recordingWing: CGFloat = 100
+    /// Fits the timer box: inset 4 + 7 + dot 6 + 5 + "00:00" ≈36 + 7 ≈ 65.
+    static let recordingWing: CGFloat = 66
     static let collapsedBottomRadius: CGFloat = 12
     /// Expanded: square top corners (flush with the screen edge, like the
     /// notch), rounded bottom.
@@ -378,18 +370,23 @@ struct NotchIslandView: View {
     /// hidden to visible with a 0.05s step (staggeredReveal); on collapse they
     /// all exit fast without stagger.
     @State private var reveal = false
-    // Hover state drives target scale (chevron, Ask, clock).
+    // Hover state drives target scale and the recording waveform/stop swap.
+    @State private var recordHovering = false
     @State private var chevronHovering = false
     @State private var clockHovering = false
-    @State private var askHovering = false
     /// Ask Q&A state lives here (not in the pane) so an answer survives the
     /// card collapsing or the user switching to another page and back.
     @StateObject private var askViewModel = AskViewModel()
+    /// 10-minute nudge ("Have anything to clarify? I can help"): fires once
+    /// per recording, shows for 2 seconds, then hides again.
+    @State private var showNudge = false
+    @State private var nudgeTask: Task<Void, Never>?
 
     private struct LayoutKey: Equatable {
         var open: Bool
         var pane: Pane
         var recording: Bool
+        var showNudge: Bool
     }
 
     private var metrics: IslandMetrics { model.metrics }
@@ -423,7 +420,7 @@ struct NotchIslandView: View {
         // longer on enter (expand), shorter on exit (collapse). Reduce Motion:
         // the shape snaps (no movement); content still crossfades.
             .animation(reduceMotion ? nil : (open ? IslandMotion.expand : IslandMotion.collapse),
-                       value: LayoutKey(open: open, pane: content, recording: recording))
+                       value: LayoutKey(open: open, pane: content, recording: recording, showNudge: showNudge))
             // onChange, not onReceive: a publisher built inside body is re-subscribed on every
             // render and replays lastReport, so presentSuccess → re-render → replay looped forever.
             .onChange(of: manager.lastReport) { _, report in
@@ -436,6 +433,16 @@ struct NotchIslandView: View {
             }
             .onChange(of: model.page) { _, _ in
                 restartReveal(open: model.isExpanded)
+            }
+            // 10-minute nudge: at 10:00 of recording, expand for 2 seconds
+            // with "Have anything to clarify? I can help", then hide again.
+            .onChange(of: manager.isRecording) { _, recording in
+                if recording {
+                    scheduleNudge()
+                } else {
+                    nudgeTask?.cancel()
+                    showNudge = false
+                }
             }
             // Ask needs typing: the panel can become key (see canBecomeKey —
             // same precedent as the Groq key field), so make it key when Ask
@@ -468,6 +475,11 @@ struct NotchIslandView: View {
             ZStack(alignment: .top) {
                 if open {
                     VStack(spacing: 0) {
+                        // 10-minute nudge: small, slides in from the left,
+                        // tap it to open Ask.
+                        if showNudge && isTabbedPane(content) {
+                            nudgeRow
+                        }
                         // Tab strip (Notes / Ask / History) above the page:
                         // the user can always switch panes, and History is
                         // reachable from Ask too. The chevron stays
@@ -557,7 +569,10 @@ struct NotchIslandView: View {
 
     private func bodyHeight(_ content: Pane) -> CGFloat {
         switch content {
-        case .outputs, .history, .ask: return IslandMetrics.maxBodyHeight + tabStripHeight
+        case .outputs, .history, .ask:
+            var height = IslandMetrics.maxBodyHeight + tabStripHeight
+            if showNudge { height += nudgeHeight }
+            return height
         case .processing: return 40
         // 4 top + 24 headline + 16 title + 16 details + 10 + 26 buttons + 12 bottom.
         case .review: return 108
@@ -575,81 +590,41 @@ struct NotchIslandView: View {
 
     // MARK: Top row
 
-    /// Icon-only on the right, labelled on the left: record on the left wing
-    /// (mic + "Rec." idle, stop square + "Stop" + live waveform while
-    /// recording); on the right wing, the Ask button (sparkles, icon only)
-    /// sits beside the chevron — or beside the live timer while collapsed
-    /// and recording. On a notched screen the camera housing sits in the
-    /// Spacer between the wings. Ask is ALWAYS tappable (except while a
-    /// pipeline or blocker holds the card, or with no Groq key) — before the
-    /// first chunk is transcribed the pane opens with generic questions and
-    /// a form that answers from the app, instead of the button sitting
-    /// there dead with no explanation.
-    ///
-    /// Ask, the chevron and the clock scale on hover; the record control
-    /// does not. Island-level continuous hover still controls collapse grace.
+    /// Icon-only on both sides, as on master: record on the left wing (mic
+    /// idle; live waveform while recording, stop square on hover), chevron
+    /// on the right — or the live timer while collapsed and recording. Ask
+    /// lives behind the chips inside the expanded card, not in the top row.
+    /// On a notched screen the camera housing sits in the Spacer between
+    /// the wings. Each interactive target scales on hover; island-level
+    /// continuous hover still controls collapse grace.
     private func topRow(open: Bool, content: Pane, recording: Bool) -> some View {
         HStack(spacing: 0) {
-            // No hover scale on the record control: it must never grow or
-            // shift under the pointer (the label and waveform stay put).
             recordControl(open: open)
+                .modifier(ElementHoverScale(isHovering: $recordHovering,
+                                            enabled: !manager.isProcessing && groqKeyValid,
+                                            cornerRadius: metrics.controlCornerRadius))
             Spacer(minLength: 0)
-            HStack(spacing: 4) {
-                askButton(content: content)
-                    .modifier(ElementHoverScale(isHovering: $askHovering,
-                                                enabled: askEnabled(content: content),
-                                                cornerRadius: metrics.controlCornerRadius))
-                ZStack(alignment: .trailing) {
-                    if recording && !open {
-                        // Collapsed + recording: blinking dot + timer (items 22, 24)
-                        collapsedClock
-                            .modifier(ElementHoverScale(isHovering: $clockHovering,
-                                                        cornerRadius: metrics.controlCornerRadius,
-                                                        scales: false))
-                            .transition(.opacity)
-                    } else {
-                        chevron(open: open, content: content)
-                            .modifier(ElementHoverScale(
-                                isHovering: $chevronHovering,
-                                enabled: !(content == .processing || content == .review || content == .failure),
-                                cornerRadius: metrics.controlCornerRadius
-                            ))
-                            .transition(.opacity)
-                    }
+            ZStack(alignment: .trailing) {
+                if recording && !open {
+                    // Collapsed + recording: blinking dot + timer (items 22, 24)
+                    collapsedClock
+                        .modifier(ElementHoverScale(isHovering: $clockHovering,
+                                                    cornerRadius: metrics.controlCornerRadius,
+                                                    scales: false))
+                        .transition(.opacity)
+                } else {
+                    chevron(open: open, content: content)
+                        .modifier(ElementHoverScale(
+                            isHovering: $chevronHovering,
+                            enabled: !(content == .processing || content == .review || content == .failure),
+                            cornerRadius: metrics.controlCornerRadius
+                        ))
+                        .transition(.opacity)
                 }
             }
         }
         // Same inset open or collapsed: glyphs land ~11pt in, on the body's 12pt text edge.
         .padding(.horizontal, metrics.controlEdgeInset)
-    }
-
-    /// Ask is usable whenever there is a Groq key and no pipeline or blocker
-    /// holds the card. It is NOT gated on having a transcript: the button
-    /// stays tappable and the pane itself explains when there is nothing to
-    /// ask about yet — a disabled button gives the user no way to find out why.
-    private func askEnabled(content: Pane) -> Bool {
-        guard groqKeyValid else { return false }
-        switch content {
-        case .processing, .review, .failure: return false
-        default: return true
-        }
-    }
-
-    /// Icon-only Ask button: a blue star in the same 24pt box as the chevron,
-    /// directly to its left. Opens the Ask pane; the tab strip (or the
-    /// chevron, to collapse) is the way back.
-    private func askButton(content: Pane) -> some View {
-        Button { model.openAsk() } label: {
-            Image(systemName: "sparkle")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.blue.opacity(content == .ask ? 0.9 : 0.55))
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(PressScaleStyle())
-        .disabled(!askEnabled(content: content))
-        .help("Ask about this meeting")
-        .accessibilityLabel("Ask about this meeting")
     }
 
     // MARK: Record control (items 19 + 25)
@@ -659,6 +634,7 @@ struct NotchIslandView: View {
             isRecording: manager.isRecording,
             isProcessing: manager.isProcessing,
             groqKeyValid: groqKeyValid,
+            isHovered: recordHovering,
             recorder: manager.audioRecorder,
             action: { toggleRecording() }
         )
@@ -808,6 +784,58 @@ struct NotchIslandView: View {
         default:
             break
         }
+    }
+
+    // MARK: 10-minute nudge
+
+    /// Height of the nudge row (26pt). The card grows by this much while it shows.
+    private var nudgeHeight: CGFloat { 26 }
+
+    /// Fires once per recording, 10 minutes in: expands the notch for 2
+    /// seconds with "Have anything to clarify? I can help", then hides
+    /// again (and collapses, if it expanded just for the nudge). Skipped if
+    /// Ask is already open or a pipeline/blocker holds the card.
+    private func scheduleNudge() {
+        nudgeTask?.cancel()
+        guard let start = manager.recordingStartedAt else { return }
+        let delay = max(0, 600 - Date().timeIntervalSince(start))
+        nudgeTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, manager.isRecording,
+                  !model.askOpen, isTabbedPane(currentPane) else { return }
+            let wasExpanded = model.isExpanded
+            if !wasExpanded { model.expand() }
+            withAnimation(IslandMotion.contentIn) { showNudge = true }
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            withAnimation(IslandMotion.contentOut) { showNudge = false }
+            if !wasExpanded { model.collapseNow() }
+        }
+    }
+
+    /// Small nudge row: blue star + "Have anything to clarify? I can help".
+    /// Slides in from the left; tapping it opens Ask and dismisses the nudge.
+    private var nudgeRow: some View {
+        Button {
+            nudgeTask?.cancel()
+            showNudge = false
+            model.openAsk()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkle")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.blue.opacity(0.9))
+                Text("Have anything to clarify? I can help")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.white.opacity(0.85))
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 26)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .transition(.move(edge: .leading).combined(with: .opacity))
     }
 
     // MARK: Outputs page (items 13 island, 27)
@@ -1258,72 +1286,53 @@ struct GroqOnboardingCard: View {
 
 // MARK: - Record control button (items 19 + 25)
 
-/// The record/stop control in the top-left wing.
+/// The record/stop control in the top-left wing, as on master: icon-only.
 /// Item 19: NO red circle background. Glyph is RED while recording, WHITE while idle.
+/// While recording the glyph is the live waveform; hovering it reveals the
+/// stop square. The icon morphs inside its 24pt box; the control itself
+/// never scales or shifts (no hover grow, no press shrink).
 /// Item 13: Disabled (greyed) when groqKeyValid is false.
-/// No scale animation on this control: no hover grow, no press shrink —
-/// the label and waveform never shift under the pointer (the icon still
-/// morphs mic → stop inside its 24pt box).
-/// Balance: the control carries a label that matches the right wing's two
-/// icons — "Rec." beside the mic while idle, "Stop" beside the stop square
-/// while recording, with the live waveform after it (no more hover-to-reveal
-/// the stop; everything is always visible). Spacing is 2pt between icon,
-/// label and waveform — one tight control. Processing shows only
-/// the spinner.
 struct RecordControlButton: View {
     var isRecording: Bool
     var isProcessing: Bool
     var groqKeyValid: Bool
+    var isHovered: Bool
     @ObservedObject var recorder: AudioRecorder
     var action: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private enum Glyph { case mic, stop, busy }
+    private enum Glyph { case mic, wave, stop, busy }
     private var glyph: Glyph {
         if isProcessing { return .busy }
         if !isRecording { return .mic }
-        return .stop
+        return isHovered ? .stop : .wave
     }
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 2) {
-                // The icon morphs mic → stop (and back) with the existing
-                // scale+blur crossfade, on one spring.
-                ZStack {
-                    Image(systemName: "mic.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.white)
-                        .offset(y: -1) // mic.fill's stand pulls its optical centre low
-                        .modifier(GlyphMorph(visible: glyph == .mic, reduceMotion: reduceMotion))
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(Color.red)
-                        .frame(width: 9, height: 9)
-                        .modifier(GlyphMorph(visible: glyph == .stop, reduceMotion: reduceMotion))
-                    ProgressView()
-                        .controlSize(.mini)
-                        .modifier(GlyphMorph(visible: glyph == .busy, reduceMotion: reduceMotion))
-                }
-                .frame(width: IslandMetrics.controlSize, height: IslandMetrics.controlSize)
-                .animation(reduceMotion ? IslandMotion.reducedFade : .spring(duration: 0.3, bounce: 0.2), value: glyph)
-                // Idle: "Rec." beside the mic. Recording: "Stop" beside the
-                // stop square, then the live waveform. The label swaps with
-                // a short fade; the waveform animates on its own clock.
-                if isRecording {
-                    Text("Stop")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.85))
-                        .transition(.opacity)
-                    RecordingWaveform(level: recorder.audioLevel, active: true)
-                        .transition(.opacity)
-                } else if !isProcessing {
-                    Text("Rec.")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.85))
-                        .transition(.opacity)
-                }
+            // All four glyphs stay mounted and cross-morph (scale + blur + fade) on one
+            // spring, so mic → waveform → stop is one continuous, interruptible motion.
+            ZStack {
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white)
+                    .offset(y: -1) // mic.fill's stand pulls its optical centre low
+                    .modifier(GlyphMorph(visible: glyph == .mic, reduceMotion: reduceMotion))
+                RecordingWaveform(level: recorder.audioLevel, active: glyph == .wave)
+                    .modifier(GlyphMorph(visible: glyph == .wave, reduceMotion: reduceMotion))
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Color.red)
+                    .frame(width: 9, height: 9)
+                    .modifier(GlyphMorph(visible: glyph == .stop, reduceMotion: reduceMotion))
+                ProgressView()
+                    .controlSize(.mini)
+                    .modifier(GlyphMorph(visible: glyph == .busy, reduceMotion: reduceMotion))
             }
-            .animation(reduceMotion ? IslandMotion.reducedFade : .easeOut(duration: 0.2), value: isRecording)
+            // Glyph centred in its box; the box (= hover highlight) is square for mic/stop
+            // and widens for the 21pt waveform, keeping the same 7pt inset each side.
+            .frame(width: glyph == .wave ? 21 + 2 * IslandMetrics.controlContentInset : IslandMetrics.controlSize,
+                   height: IslandMetrics.controlSize)
+            .animation(reduceMotion ? IslandMotion.reducedFade : .spring(duration: 0.3, bounce: 0.2), value: glyph)
             .contentShape(Rectangle())
         }
         // Plain: no press scale — the control never shrinks on tap.

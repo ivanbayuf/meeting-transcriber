@@ -11,6 +11,9 @@ import SwiftUI
 final class AskViewModel: ObservableObject {
     @Published var suggestions: [String] = []
     @Published var isLoadingSuggestions = false
+    /// Whether the loaded suggestion list is currently shown under the
+    /// button. The button itself is always visible; this toggles the list.
+    @Published var showSuggestions = false
     @Published var currentQuestion: String?
     @Published var answer: AskAnswer?
     @Published var isAsking = false
@@ -36,10 +39,23 @@ final class AskViewModel: ObservableObject {
         do {
             suggestions = try await manager.suggestedQuestions()
             coverageNote = manager.askCoverageNote
+            showSuggestions = true
         } catch {
             errorMessage = error.localizedDescription
         }
         isLoadingSuggestions = false
+    }
+
+    /// The button's action: load the list the first time, then toggle it.
+    /// The button stays visible even after an answer, so the user can
+    /// always pull the list back up.
+    func toggleSuggestions() async {
+        guard !isLoadingSuggestions else { return }
+        if !suggestions.isEmpty {
+            showSuggestions.toggle()
+            return
+        }
+        await loadSuggestions()
     }
 
     /// Asks one question; a follow-up just replaces the displayed answer.
@@ -51,6 +67,9 @@ final class AskViewModel: ObservableObject {
         currentQuestion = trimmed
         answer = nil
         input = ""
+        // The answer takes the room; the button stays, and the list can be
+        // pulled back up with it.
+        showSuggestions = false
         do {
             answer = try await manager.ask(question: trimmed)
             coverageNote = manager.askCoverageNote
@@ -75,14 +94,28 @@ struct AskPane: View {
             header
                 .modifier(NotchIslandView.StaggerReveal(index: 0, active: reveal))
 
+            // Compact "What should I ask?" — pinned under the header so it
+            // is always visible, even after an answer. The list below it
+            // toggles; the answer keeps its room underneath.
+            suggestionsButton
+                .modifier(NotchIslandView.StaggerReveal(index: 1, active: reveal))
+                .padding(.top, 6)
+                .padding(.horizontal, 8)
+
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 10) {
+                    if viewModel.showSuggestions {
+                        suggestionRows
+                    }
                     if viewModel.isAsking {
                         askingRow
                     } else if let answer = viewModel.answer {
                         answerView(answer)
-                    } else {
-                        suggestionsView
+                    } else if !viewModel.showSuggestions && !viewModel.isLoadingSuggestions && manager.canAsk {
+                        Text("Ask anything about what's been said so far — decisions, commitments, open items.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.white.opacity(0.45))
+                            .padding(.top, 2)
                     }
                     if let error = viewModel.errorMessage {
                         Text(error)
@@ -94,15 +127,15 @@ struct AskPane: View {
                 .padding(.top, 8)
                 .padding(.horizontal, 8)
             }
-            .modifier(NotchIslandView.StaggerReveal(index: 1, active: reveal))
+            .modifier(NotchIslandView.StaggerReveal(index: 2, active: reveal))
 
             inputRow
-                .modifier(NotchIslandView.StaggerReveal(index: 2, active: reveal))
+                .modifier(NotchIslandView.StaggerReveal(index: 3, active: reveal))
                 .padding(.top, 8)
 
             Spacer(minLength: 6)
             bottomBar
-                .modifier(NotchIslandView.StaggerReveal(index: 3, active: reveal))
+                .modifier(NotchIslandView.StaggerReveal(index: 4, active: reveal))
         }
         .padding(.horizontal, 4)
         .padding(.top, 4)
@@ -147,41 +180,41 @@ struct AskPane: View {
         .padding(.horizontal, 8)
     }
 
-    // MARK: Suggestions (before the first question)
+    // MARK: Suggestions — compact button, always visible; list toggles
 
-    private var suggestionsView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                Task { await viewModel.loadSuggestions() }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkle")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.blue.opacity(0.9))
-                    Text("What should I ask?")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.white)
-                    Spacer(minLength: 0)
-                    if viewModel.isLoadingSuggestions {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.45))
-                    }
+    private var suggestionsButton: some View {
+        Button {
+            Task { await viewModel.toggleSuggestions() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkle")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.blue.opacity(0.9))
+                Text("What should I ask?")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.white)
+                Spacer(minLength: 0)
+                if viewModel.isLoadingSuggestions {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: viewModel.showSuggestions ? "chevron.up" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.45))
                 }
-                .padding(.horizontal, 10)
-                .frame(height: 36)
-                .background(Color.white.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .contentShape(RoundedRectangle(cornerRadius: 10))
             }
-            .buttonStyle(PressScaleStyle())
-            // Always available: with a transcript it suggests from what was
-            // said; without one it shows the generic meeting questions.
-            .disabled(viewModel.isLoadingSuggestions)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(Color.white.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(PressScaleStyle())
+        .disabled(viewModel.isLoadingSuggestions)
+    }
 
+    private var suggestionRows: some View {
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(viewModel.suggestions, id: \.self) { suggestion in
                 Button {
                     Task { await viewModel.ask(suggestion) }
@@ -204,13 +237,6 @@ struct AskPane: View {
                     .contentShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(PressScaleStyle())
-            }
-
-            if viewModel.suggestions.isEmpty && !viewModel.isLoadingSuggestions && manager.canAsk {
-                Text("Ask anything about what's been said so far — decisions, commitments, open items.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.white.opacity(0.45))
-                    .padding(.top, 2)
             }
         }
     }
