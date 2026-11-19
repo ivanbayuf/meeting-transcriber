@@ -7,13 +7,16 @@ import SwiftUI
 /// answers from the transcript once there is one — and from the app itself
 /// before that (see AskAssistant.swift). Transcript answers carry the
 /// verbatim quotes they rest on, each with its time in the meeting.
+/// The Ask pane's two tabs: the suggested questions, or the free-form form.
+enum AskTab { case suggestions, ask }
+
 @MainActor
 final class AskViewModel: ObservableObject {
     @Published var suggestions: [String] = []
     @Published var isLoadingSuggestions = false
-    /// Whether the loaded suggestion list is currently shown under the
-    /// button. The button itself is always visible; this toggles the list.
-    @Published var showSuggestions = false
+    /// Which half of the pane is showing: the suggestion list, or the
+    /// free-form form with its answer.
+    @Published var askTab: AskTab = .suggestions
     @Published var currentQuestion: String?
     @Published var answer: AskAnswer?
     @Published var isAsking = false
@@ -39,23 +42,10 @@ final class AskViewModel: ObservableObject {
         do {
             suggestions = try await manager.suggestedQuestions()
             coverageNote = manager.askCoverageNote
-            showSuggestions = true
         } catch {
             errorMessage = error.localizedDescription
         }
         isLoadingSuggestions = false
-    }
-
-    /// The button's action: load the list the first time, then toggle it.
-    /// The button stays visible even after an answer, so the user can
-    /// always pull the list back up.
-    func toggleSuggestions() async {
-        guard !isLoadingSuggestions else { return }
-        if !suggestions.isEmpty {
-            showSuggestions.toggle()
-            return
-        }
-        await loadSuggestions()
     }
 
     /// Asks one question; a follow-up just replaces the displayed answer.
@@ -67,9 +57,8 @@ final class AskViewModel: ObservableObject {
         currentQuestion = trimmed
         answer = nil
         input = ""
-        // The answer takes the room; the button stays, and the list can be
-        // pulled back up with it.
-        showSuggestions = false
+        // Asking jumps to the form tab, where the answer shows.
+        askTab = .ask
         do {
             answer = try await manager.ask(question: trimmed)
             coverageNote = manager.askCoverageNote
@@ -94,24 +83,40 @@ struct AskPane: View {
             header
                 .modifier(NotchIslandView.StaggerReveal(index: 0, active: reveal))
 
-            // Compact "What should I ask?" — pinned under the header so it
-            // is always visible, even after an answer. The list below it
-            // toggles; the answer keeps its room underneath.
-            suggestionsButton
-                .modifier(NotchIslandView.StaggerReveal(index: 1, active: reveal))
-                .padding(.top, 6)
-                .padding(.horizontal, 8)
+            // The pane's two tabs: the suggested questions, or the form.
+            IslandSegmentedControl(
+                titles: ["What should I ask?", "Ask another question"],
+                selected: viewModel.askTab == .suggestions ? 0 : 1
+            ) { index in
+                viewModel.askTab = index == 0 ? .suggestions : .ask
+                if index == 0 && viewModel.suggestions.isEmpty {
+                    Task { await viewModel.loadSuggestions() }
+                }
+            }
+            .modifier(NotchIslandView.StaggerReveal(index: 1, active: reveal))
+            .padding(.top, 6)
+            .padding(.horizontal, 8)
 
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 10) {
-                    if viewModel.showSuggestions {
-                        suggestionRows
-                    }
-                    if viewModel.isAsking {
+                    if viewModel.askTab == .suggestions {
+                        if viewModel.isLoadingSuggestions && viewModel.suggestions.isEmpty {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Thinking of questions…")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.white.opacity(0.6))
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            suggestionRows
+                        }
+                    } else if viewModel.isAsking {
                         askingRow
                     } else if let answer = viewModel.answer {
                         answerView(answer)
-                    } else if !viewModel.showSuggestions && !viewModel.isLoadingSuggestions && manager.canAsk {
+                    } else if manager.canAsk {
                         Text("Ask anything about what's been said so far — decisions, commitments, open items.")
                             .font(.system(size: 11))
                             .foregroundStyle(Color.white.opacity(0.45))
@@ -129,9 +134,12 @@ struct AskPane: View {
             }
             .modifier(NotchIslandView.StaggerReveal(index: 2, active: reveal))
 
-            inputRow
-                .modifier(NotchIslandView.StaggerReveal(index: 3, active: reveal))
-                .padding(.top, 8)
+            // The form lives on its own tab; the suggestions tab gets the room.
+            if viewModel.askTab == .ask {
+                inputRow
+                    .modifier(NotchIslandView.StaggerReveal(index: 3, active: reveal))
+                    .padding(.top, 8)
+            }
 
             Spacer(minLength: 6)
             bottomBar
@@ -143,13 +151,25 @@ struct AskPane: View {
         .frame(width: width, height: IslandMetrics.maxBodyHeight, alignment: .top)
         .onAppear {
             viewModel.bind(manager)
-            // Focus after the panel has had a moment to become key (see the
-            // askOpen onChange): typing works straight away, and tapping the
-            // field focuses it anyway.
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 150_000_000)
-                inputFocused = true
+            if viewModel.askTab == .suggestions && viewModel.suggestions.isEmpty {
+                Task { await viewModel.loadSuggestions() }
             }
+            if viewModel.askTab == .ask {
+                focusInput()
+            }
+        }
+        .onChange(of: viewModel.askTab) { _, tab in
+            if tab == .ask { focusInput() }
+        }
+    }
+
+    private func focusInput() {
+        // Focus after the panel has had a moment to become key (see the
+        // askOpen onChange): typing works straight away, and tapping the
+        // field focuses it anyway.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            inputFocused = true
         }
     }
 
@@ -168,7 +188,7 @@ struct AskPane: View {
                     .foregroundStyle(Color.white)
             }
             .frame(height: 24)
-            Text("Answers come from the transcript — or the app, before it's ready.")
+            Text("Answers come from the transcript, or the app.")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.white.opacity(0.45))
             if let note = viewModel.coverageNote {
@@ -180,38 +200,7 @@ struct AskPane: View {
         .padding(.horizontal, 8)
     }
 
-    // MARK: Suggestions — compact button, always visible; list toggles
-
-    private var suggestionsButton: some View {
-        Button {
-            Task { await viewModel.toggleSuggestions() }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkle")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color.blue.opacity(0.9))
-                Text("What should I ask?")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.white)
-                Spacer(minLength: 0)
-                if viewModel.isLoadingSuggestions {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: viewModel.showSuggestions ? "chevron.up" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.45))
-                }
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 28)
-            .background(Color.white.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .contentShape(RoundedRectangle(cornerRadius: 8))
-        }
-        .buttonStyle(PressScaleStyle())
-        .disabled(viewModel.isLoadingSuggestions)
-    }
+    // MARK: Suggestions list (the "What should I ask?" tab)
 
     private var suggestionRows: some View {
         VStack(alignment: .leading, spacing: 8) {

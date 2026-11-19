@@ -23,6 +23,10 @@ struct IslandMetrics: Equatable {
     /// any text-metric rounding ate the 12pt bottom inset. +8 leaves the
     /// Spacer room and keeps the bottom bar pinned exactly 12pt from the edge.
     static let maxBodyHeight: CGFloat = 228 // 192 + one 36pt destination row (Google Docs)
+    /// Height of the tab strip (32pt segmented control + 4pt top + 6pt bottom).
+    static let tabStripHeight: CGFloat = 42
+    /// Height of the 10-minute nudge row (26pt).
+    static let nudgeHeight: CGFloat = 26
     /// Expanded card width. Widened to 330 (item 27) so the "Send notes" section
     /// has room. Still clears "Window"/"Help" menus on a 14" display. Tune here.
     static let baseExpandedWidth: CGFloat = 330
@@ -57,8 +61,12 @@ struct IslandMetrics: Equatable {
     /// Never narrower than the widest pill, so on a notch the card only grows downward.
     var expandedWidth: CGFloat { max(Self.baseExpandedWidth, collapsedWidth(recording: true)) }
     var panelSize: CGSize {
+        // Tall enough for the tallest card — body + tab strip + nudge —
+        // plus the shadow's room below it. The strip and nudge used to grow
+        // the card past the panel, so the card's bottom corners and the
+        // whole shadow were clipped by the window edge.
         CGSize(width: expandedWidth + 2 * Self.shadowInset,
-               height: topBarHeight + Self.maxBodyHeight + Self.shadowInset)
+               height: topBarHeight + Self.maxBodyHeight + Self.tabStripHeight + Self.nudgeHeight + Self.shadowInset)
     }
 
     init(notchWidth: CGFloat = 0, topBarHeight: CGFloat = 36) {
@@ -480,12 +488,11 @@ struct NotchIslandView: View {
                         if showNudge && isTabbedPane(content) {
                             nudgeRow
                         }
-                        // Tab strip (Notes / Ask / History) above the page:
-                        // the user can always switch panes, and History is
-                        // reachable from Ask too. The chevron stays
+                        // Tab strip (Notes / Ask) above the page: the user
+                        // can always switch panes. The chevron stays
                         // expand/collapse only. Transient panes (processing,
                         // review, success, failure) hold the card and show
-                        // no tabs.
+                        // no tabs; History has its own Back button.
                         if isTabbedPane(content) {
                             tabStrip(content: content)
                         }
@@ -569,10 +576,14 @@ struct NotchIslandView: View {
 
     private func bodyHeight(_ content: Pane) -> CGFloat {
         switch content {
-        case .outputs, .history, .ask:
-            var height = IslandMetrics.maxBodyHeight + tabStripHeight
-            if showNudge { height += nudgeHeight }
+        case .outputs, .ask:
+            // The card grows by the strip (and the nudge while it shows);
+            // the pages keep their height. panelSize covers the tallest.
+            var height = IslandMetrics.maxBodyHeight + IslandMetrics.tabStripHeight
+            if showNudge { height += IslandMetrics.nudgeHeight }
             return height
+        case .history:
+            return IslandMetrics.maxBodyHeight
         case .processing: return 40
         // 4 top + 24 headline + 16 title + 16 details + 10 + 26 buttons + 12 bottom.
         case .review: return 108
@@ -715,58 +726,27 @@ struct NotchIslandView: View {
                 width: metrics.expandedWidth, bottomBar: AnyView(bottomBar))
     }
 
-    // MARK: Tab strip (Notes / Ask / History)
+    // MARK: Tab strip (Notes / Ask) — segmented control
 
-    /// Height of the tab strip (26pt chips + 4pt top + 6pt bottom). The card
-    /// grows by this much on the tabbed panes; the pages keep their height.
-    private var tabStripHeight: CGFloat { 36 }
-
-    /// Tabs show on the three main panes only — the places the user can
-    /// freely switch between. Transient panes pin the card.
+    /// Tabs show on the two main panes only — the places the user can
+    /// freely switch between. History lives in the bottom bar (and its own
+    /// Back button), not in the strip. Transient panes pin the card.
     private func isTabbedPane(_ pane: Pane) -> Bool {
-        pane == .outputs || pane == .history || pane == .ask
+        pane == .outputs || pane == .ask
     }
 
-    /// Notes / Ask / History chips above the page. Selecting a tab closes
-    /// Ask when leaving it, so History (and Notes) are reachable from Ask —
-    /// the bottom bar's History button does the same.
+    /// Notes / Ask segmented control above the page. Selecting a tab closes
+    /// Ask when leaving it.
     private func tabStrip(content: Pane) -> some View {
-        HStack(spacing: 6) {
-            tabChip(title: "Notes", icon: "doc.text", selected: content == .outputs) {
-                showTab(.outputs)
-            }
-            tabChip(title: "Ask", icon: "sparkle", selected: content == .ask) {
-                showTab(.ask)
-            }
-            tabChip(title: "History", icon: "clock.arrow.circlepath", selected: content == .history) {
-                showTab(.history)
-            }
-            Spacer(minLength: 0)
+        IslandSegmentedControl(
+            titles: ["Notes", "Ask"],
+            selected: content == .ask ? 1 : 0
+        ) { index in
+            showTab(index == 0 ? .outputs : .ask)
         }
         .padding(.horizontal, 12)
         .padding(.top, 4)
         .padding(.bottom, 6)
-    }
-
-    private func tabChip(title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.system(size: 11, weight: .medium))
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .foregroundStyle(selected ? Color.white.opacity(0.95) : Color.white.opacity(0.55))
-            .padding(.horizontal, 12)
-            .frame(height: 26)
-            .background(selected
-                        ? Color.white.opacity(0.12)
-                        : Color.white.opacity(0.05))
-            .clipShape(Capsule())
-            .contentShape(Capsule())
-        }
-        .buttonStyle(PressScaleStyle())
-        .accessibilityLabel(title)
     }
 
     /// Switches the main pane. Ask opens via openAsk; leaving Ask closes
@@ -775,9 +755,6 @@ struct NotchIslandView: View {
         switch tab {
         case .ask:
             model.openAsk()
-        case .history:
-            model.closeAsk()
-            model.page = .history
         case .outputs:
             model.closeAsk()
             model.page = .main
@@ -787,9 +764,6 @@ struct NotchIslandView: View {
     }
 
     // MARK: 10-minute nudge
-
-    /// Height of the nudge row (26pt). The card grows by this much while it shows.
-    private var nudgeHeight: CGFloat { 26 }
 
     /// Fires once per recording, 10 minutes in: expands the notch for 2
     /// seconds with "Have anything to clarify? I can help", then hides
@@ -1290,6 +1264,47 @@ struct GroqOnboardingCard: View {
 }
 
 // MARK: - Record control button (items 19 + 25)
+
+/// Segmented control in the island's language: a grey capsule track with
+/// the selected segment a lighter pill that slides across (cf. the iOS
+/// Places-style picker). Used for the main tabs (Notes / Ask) and the Ask
+/// sub-tabs (What should I ask? / Ask another question).
+struct IslandSegmentedControl: View {
+    var titles: [String]
+    var selected: Int
+    var onSelect: (Int) -> Void
+    @Namespace private var namespace
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(titles.indices, id: \.self) { index in
+                Button {
+                    onSelect(index)
+                } label: {
+                    Text(titles[index])
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(selected == index ? 0.95 : 0.55))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 26)
+                        .background {
+                            if selected == index {
+                                Capsule()
+                                    .fill(Color.white.opacity(0.12))
+                                    .matchedGeometryEffect(id: "segment", in: namespace)
+                            }
+                        }
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(titles[index])
+            }
+        }
+        .padding(3)
+        .background(Color.white.opacity(0.06))
+        .clipShape(Capsule())
+        .animation(.easeOut(duration: 0.2), value: selected)
+    }
+}
 
 /// The record/stop control in the top-left wing, as on master: icon-only.
 /// Item 19: NO red circle background. Glyph is RED while recording, WHITE while idle.
