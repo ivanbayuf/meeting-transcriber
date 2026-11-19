@@ -28,10 +28,10 @@ actor LivePipeline {
     /// Called (once per chunk, on the actor) when a chunk's transcript lands —
     /// the island uses it to reveal the Ask button as soon as there is
     /// something to ask about.
-    private let onChunkTranscribed: (() -> Void)?
+    private let onChunkTranscribed: (@Sendable () -> Void)?
 
     init(groq: GroqClient, language: String?, meetingDate: Date, segmentDuration: TimeInterval = 600,
-         onChunkTranscribed: (() -> Void)? = nil) {
+         onChunkTranscribed: (@Sendable () -> Void)? = nil) {
         self.groq = groq
         self.language = language
         self.meetingDate = meetingDate

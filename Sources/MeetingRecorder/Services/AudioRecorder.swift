@@ -67,10 +67,10 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
     var onSegment: ((URL?, Int, Bool) -> Void)?
     /// 10 minutes at 16 kHz. DEBUG: `defaults write com.ivanbayu.meetingrecorder
     /// debugSegmentSeconds 30` makes short test recordings exercise the live path.
-    static var segmentFrames: Int {
-        let seconds = UserDefaults.standard.object(forKey: "debugSegmentSeconds") as? Int ?? 600
-        return 16_000 * max(10, seconds)
+    static var segmentSeconds: Int {
+        max(10, UserDefaults.standard.object(forKey: "debugSegmentSeconds") as? Int ?? 600)
     }
+    static var segmentFrames: Int { 16_000 * segmentSeconds }
     private var segmentFile: AVAudioFile?        // guarded by writeLock
     private var segmentIndex = 0                 // guarded by writeLock
     private var segmentFramesWritten = 0         // guarded by writeLock
