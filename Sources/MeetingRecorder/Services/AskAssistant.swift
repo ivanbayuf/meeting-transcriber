@@ -142,9 +142,14 @@ extension GroqClient {
 
     /// One verbatim unit the model can cite: a Whisper segment (with its
     /// start time) or one sentence of a plain transcript (time -1).
+    /// `position` is the unit's place in the transcript — the order units
+    /// are presented in. Segments are stored in time order, so position ==
+    /// time order for timestamped meetings; for a plain transcript (time -1
+    /// throughout) it is the only order there is.
     private struct SourcedUnit {
         let time: TimeInterval
         let line: String
+        let position: Int
     }
 
     /// Transcript lines prefixed with their segment start time, so the model
@@ -159,10 +164,10 @@ extension GroqClient {
                                           summary: String?) -> (text: String, truncated: Bool) {
         let units: [SourcedUnit]
         if let segments, !segments.isEmpty {
-            units = segments.map { segment in
+            units = segments.enumerated().map { index, segment in
                 let total = Int(segment.start)
                 let label = String(format: "%02d:%02d", total / 60, total % 60)
-                return SourcedUnit(time: segment.start, line: "[\(label)] \(segment.text)")
+                return SourcedUnit(time: segment.start, line: "[\(label)] \(segment.text)", position: index)
             }
         } else {
             units = plainTextUnits(transcript)
@@ -179,8 +184,11 @@ extension GroqClient {
     }
 
     /// Picks the verbatim units that fit `maxChars`: highest keyword overlap
-    /// with the question first (ties broken by recency), returned in time
-    /// order. No question, or nothing matches → the most recent units.
+    /// with the question first (ties broken by recency), returned in
+    /// transcript order. No question, or nothing matches → the most recent
+    /// units. Ordered by position, not time: a plain transcript has no times
+    /// (all -1), so time order would leave the picks in score order and the
+    /// "most recent" fallback would take the oldest lines instead.
     private static func selectUnits(_ units: [SourcedUnit], question: String?,
                                     maxChars: Int) -> [SourcedUnit] {
         let words = questionWords(question)
@@ -190,7 +198,7 @@ extension GroqClient {
         }
         let ordered = scored.sorted {
             if $0.score != $1.score { return $0.score > $1.score }
-            return $0.unit.time > $1.unit.time
+            return $0.unit.position > $1.unit.position
         }
         let pool = ordered.contains { $0.score > 0 } ? ordered.filter { $0.score > 0 } : ordered
         var chosen: [SourcedUnit] = []
@@ -201,7 +209,7 @@ extension GroqClient {
             chosen.append(entry.unit)
             count += len
         }
-        return chosen.sorted { $0.time < $1.time }
+        return chosen.sorted { $0.position < $1.position }
     }
 
     /// Significant words from the question for retrieval: lowercased, ≥3
@@ -220,21 +228,22 @@ extension GroqClient {
     }
 
     /// Plain transcript (no Whisper segments — older history): sentence-sized
-    /// units so retrieval can still pick the relevant part. Time unknown (-1).
+    /// units so retrieval can still pick the relevant part. Time unknown (-1);
+    /// position is the sentence's order in the transcript.
     private static func plainTextUnits(_ transcript: String) -> [SourcedUnit] {
-        var units: [SourcedUnit] = []
+        var lines: [String] = []
         var start = transcript.startIndex
         for index in transcript.indices where ".!?。！？\n".contains(transcript[index]) {
             let next = transcript.index(after: index)
             let sentence = transcript[start..<next].trimmingCharacters(in: .whitespacesAndNewlines)
-            if !sentence.isEmpty { units.append(SourcedUnit(time: -1, line: sentence)) }
+            if !sentence.isEmpty { lines.append(sentence) }
             start = next
         }
         if start < transcript.endIndex {
             let tail = transcript[start...].trimmingCharacters(in: .whitespacesAndNewlines)
-            if !tail.isEmpty { units.append(SourcedUnit(time: -1, line: tail)) }
+            if !tail.isEmpty { lines.append(tail) }
         }
-        return units
+        return lines.enumerated().map { SourcedUnit(time: -1, line: $0.element, position: $0.offset) }
     }
 
     private static let askSystemPrompt = """
