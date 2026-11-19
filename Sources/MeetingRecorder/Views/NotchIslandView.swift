@@ -29,10 +29,13 @@ struct IslandMetrics: Equatable {
     /// Collapsed = icon-only. Each wing holds one 24pt control (record left,
     /// chevron right) → 80pt total without a notch. On a notched screen the
     /// wings sit either side of the camera housing (nothing can draw under it).
-    static let idleWing: CGFloat = 40
+    /// Ask adds a second 24pt control to the right wing (sparkles beside the
+    /// chevron), so the idle wing grows to hold both: 24 + 4 + 24 + insets.
+    static let idleWing: CGFloat = 64
     /// While recording the wings widen just enough for the live timer.
-    /// Fits the timer box: inset 4 + 7 + dot 6 + 5 + "00:00" ≈36 + 7 ≈ 65.
-    static let recordingWing: CGFloat = 66
+    /// Fits the timer box: inset 4 + 7 + dot 6 + 5 + "00:00" ≈36 + 7 ≈ 65 —
+    /// plus the Ask button beside it: + 4 + 24.
+    static let recordingWing: CGFloat = 100
     static let collapsedBottomRadius: CGFloat = 12
     /// Expanded: square top corners (flush with the screen edge, like the
     /// notch), rounded bottom.
@@ -229,6 +232,9 @@ final class IslandModel: ObservableObject {
     @Published var page: Page = .main
     /// Non-nil while the "Saved" result card is showing.
     @Published private(set) var flash: OutputReport?
+    /// The Ask pane is open (icon-only sparkles button, beside the chevron).
+    /// While set, the card never auto-collapses — the user is reading answers.
+    @Published var askOpen = false
 
     var onHide: () -> Void = {}
     /// Opens the Settings window, optionally scrolled to a section.
@@ -291,7 +297,19 @@ final class IslandModel: ObservableObject {
         flashTask?.cancel()
         flashHolding = false
         flash = nil
+        askOpen = false
         isExpanded = false
+    }
+
+    /// Opens the Ask pane (and the card, if it was collapsed).
+    func openAsk() {
+        askOpen = true
+        expand()
+    }
+
+    /// Back from Ask to whatever page the island was on.
+    func closeAsk() {
+        askOpen = false
     }
 
     /// Shows the result card, then collapses after `flashDuration` — unless the
@@ -335,7 +353,7 @@ final class IslandModel: ObservableObject {
         hoverTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self else { return }
-            guard !self.isHovering, self.holdCount == 0, !self.flashHolding else { return }
+            guard !self.isHovering, self.holdCount == 0, !self.flashHolding, !self.askOpen else { return }
             self.collapseNow()
         }
     }
@@ -349,7 +367,7 @@ struct NotchIslandView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// What the card body shows. (Not "Body" — that name is View's associated type.)
-    enum Pane: Hashable { case outputs, history, processing, review, success, failure }
+    enum Pane: Hashable { case outputs, history, processing, review, success, failure, ask }
 
     /// One-by-one content reveal: when the card expands, elements flip from
     /// hidden to visible with a 0.05s step (staggeredReveal); on collapse they
@@ -359,6 +377,10 @@ struct NotchIslandView: View {
     @State private var recordHovering = false
     @State private var chevronHovering = false
     @State private var clockHovering = false
+    @State private var askHovering = false
+    /// Ask Q&A state lives here (not in the pane) so an answer survives the
+    /// card collapsing or the user switching to another page and back.
+    @StateObject private var askViewModel = AskViewModel()
 
     private struct LayoutKey: Equatable {
         var open: Bool
@@ -374,6 +396,7 @@ struct NotchIslandView: View {
         if manager.pendingReview != nil { return .review }
         if manager.errorMessage != nil { return .failure }
         if model.flash != nil { return .success }
+        if model.askOpen { return .ask }
         return model.page == .history ? .history : .outputs
     }
 
@@ -409,6 +432,14 @@ struct NotchIslandView: View {
             }
             .onChange(of: model.page) { _, _ in
                 restartReveal(open: model.isExpanded)
+            }
+            // Ask needs typing: the panel can become key (see canBecomeKey —
+            // same precedent as the Groq key field), so make it key when Ask
+            // opens and the input can take focus straight away.
+            .onChange(of: model.askOpen) { _, open in
+                if open {
+                    NSApp.windows.compactMap({ $0 as? NotchIslandPanel }).first?.makeKey()
+                }
             }
     }
 
@@ -491,7 +522,8 @@ struct NotchIslandView: View {
     /// One-by-one reveal (Ivan's 2026-11-18 request): on expand, each element
     /// fades + slides up 6pt IN ORDER with a 0.05s step. On collapse everything
     /// exits fast without stagger. Reduce Motion: opacity only, no slide.
-    private struct StaggerReveal: ViewModifier {
+    /// Internal (not private) so the Ask pane can stagger the same way.
+    struct StaggerReveal: ViewModifier {
         var index: Int
         var active: Bool
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -510,7 +542,7 @@ struct NotchIslandView: View {
 
     private func bodyHeight(_ content: Pane) -> CGFloat {
         switch content {
-        case .outputs, .history: return IslandMetrics.maxBodyHeight
+        case .outputs, .history, .ask: return IslandMetrics.maxBodyHeight
         case .processing: return 40
         // 4 top + 24 headline + 16 title + 16 details + 10 + 26 buttons + 12 bottom.
         case .review: return 108
@@ -528,9 +560,10 @@ struct NotchIslandView: View {
 
     // MARK: Top row
 
-    /// Icon-only: record/stop on the left wing; chevron (or, while collapsed and
-    /// recording, the live timer + blinking dot) on the right wing. On a notched
-    /// screen the camera housing sits in the Spacer between the wings.
+    /// Icon-only: record/stop on the left wing; on the right wing, the Ask
+    /// button (sparkles, icon only) sits beside the chevron — or beside the
+    /// live timer while collapsed and recording. On a notched screen the
+    /// camera housing sits in the Spacer between the wings.
     ///
     /// Each interactive target scales on hover; island-level continuous hover
     /// still controls collapse grace.
@@ -541,27 +574,61 @@ struct NotchIslandView: View {
                                             enabled: !manager.isProcessing && groqKeyValid,
                                             cornerRadius: metrics.controlCornerRadius))
             Spacer(minLength: 0)
-            ZStack(alignment: .trailing) {
-                if recording && !open {
-                    // Collapsed + recording: blinking dot + timer (items 22, 24)
-                    collapsedClock
-                        .modifier(ElementHoverScale(isHovering: $clockHovering,
-                                                    cornerRadius: metrics.controlCornerRadius,
-                                                    scales: false))
-                        .transition(.opacity)
-                } else {
-                    chevron(open: open, content: content)
-                        .modifier(ElementHoverScale(
-                            isHovering: $chevronHovering,
-                            enabled: !(content == .processing || content == .review || content == .failure),
-                            cornerRadius: metrics.controlCornerRadius
-                        ))
-                        .transition(.opacity)
+            HStack(spacing: 4) {
+                askButton(content: content)
+                    .modifier(ElementHoverScale(isHovering: $askHovering,
+                                                enabled: askEnabled(content: content),
+                                                cornerRadius: metrics.controlCornerRadius))
+                ZStack(alignment: .trailing) {
+                    if recording && !open {
+                        // Collapsed + recording: blinking dot + timer (items 22, 24)
+                        collapsedClock
+                            .modifier(ElementHoverScale(isHovering: $clockHovering,
+                                                        cornerRadius: metrics.controlCornerRadius,
+                                                        scales: false))
+                            .transition(.opacity)
+                    } else {
+                        chevron(open: open, content: content)
+                            .modifier(ElementHoverScale(
+                                isHovering: $chevronHovering,
+                                enabled: !(content == .processing || content == .review || content == .failure),
+                                cornerRadius: metrics.controlCornerRadius
+                            ))
+                            .transition(.opacity)
+                    }
                 }
             }
         }
         // Same inset open or collapsed: glyphs land ~11pt in, on the body's 12pt text edge.
         .padding(.horizontal, metrics.controlEdgeInset)
+    }
+
+    /// Ask is usable whenever there is a transcript to ask about — the live
+    /// partial while recording, or the finished meeting's text — and never
+    /// while a pipeline or blocker holds the card.
+    private func askEnabled(content: Pane) -> Bool {
+        guard groqKeyValid else { return false }
+        switch content {
+        case .processing, .review, .failure: return false
+        default: return manager.canAsk
+        }
+    }
+
+    /// Icon-only Ask button: sparkles in the same 24pt box as the chevron,
+    /// directly to its left. Opens the Ask pane; the pane's own back chevron
+    /// (or the main chevron) closes it.
+    private func askButton(content: Pane) -> some View {
+        Button { model.openAsk() } label: {
+            Image(systemName: "sparkles")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.white.opacity(content == .ask ? 0.9 : 0.55))
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressScaleStyle())
+        .disabled(!askEnabled(content: content))
+        .help("Ask about this meeting")
+        .accessibilityLabel("Ask about this meeting")
     }
 
     // MARK: Record control (items 19 + 25)
@@ -640,6 +707,17 @@ struct NotchIslandView: View {
         case .review: reviewPage
         case .success: successPage(model.flash)
         case .failure: failurePage
+        case .ask: askPage
+        }
+    }
+
+    /// Ask pane: suggestions + free-form questions about the transcript, with
+    /// the same bottom bar (Stop / History / Settings / Hide) so recording
+    /// controls stay reachable while asking.
+    private var askPage: some View {
+        AskPane(viewModel: askViewModel, manager: manager, reveal: reveal,
+                width: metrics.expandedWidth, bottomBar: AnyView(bottomBar)) {
+            model.closeAsk()
         }
     }
 

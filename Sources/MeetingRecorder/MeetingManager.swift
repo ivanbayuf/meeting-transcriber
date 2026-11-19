@@ -458,11 +458,14 @@ final class MeetingManager: ObservableObject {
                     // Everything but the last chunk was done during the meeting.
                     transcript = live.transcript
                     livePartials = live.partials
+                    meeting.segments = live.segments
                 } else {
                     // No live result (short-circuited, failed, or a Retry): whole recording.
                     guard let audioURL = meeting.audioURL else { throw PipelineError.missingAudio }
                     let language = selectedLanguageRaw == "auto" ? nil : selectedLanguageRaw
-                    transcript = try await groqClient.transcribe(audioURL: audioURL, language: language).text
+                    let result = try await groqClient.transcribe(audioURL: audioURL, language: language)
+                    transcript = result.text
+                    meeting.segments = result.segments
                 }
                 meeting.transcript = transcript
             }
@@ -503,6 +506,51 @@ final class MeetingManager: ObservableObject {
         }
 
         saveHistory()
+    }
+
+    // MARK: - Ask about this meeting
+
+    /// Transcript + timestamped segments for Ask. While recording, the live
+    /// pipeline's partial transcript (finished chunks so far); otherwise the
+    /// finished meeting's stored transcript. Nil when there is nothing to ask
+    /// about yet. Only the current meeting is askable in v1 — history meetings
+    /// keep their transcripts, but Ask doesn't open them yet.
+    func askContext() async -> (transcript: String, segments: [TranscriptionSegment], date: Date)? {
+        if isRecording, let pipeline = livePipeline {
+            let live = await pipeline.partialTranscript()
+            if !live.text.isEmpty {
+                return (live.text, live.segments, currentMeeting?.startDate ?? Date())
+            }
+        }
+        if let meeting = pendingReview ?? currentMeeting,
+           let text = meeting.transcript, !text.isEmpty {
+            return (text, meeting.segments ?? [], meeting.startDate)
+        }
+        return nil
+    }
+
+    /// True when Ask has anything to work with (live partial or finished text).
+    var canAsk: Bool {
+        if isRecording { return true }
+        if let meeting = pendingReview ?? currentMeeting,
+           let text = meeting.transcript, !text.isEmpty { return true }
+        return false
+    }
+
+    /// Answers one question from the transcript. Throws `AskError.noTranscript`
+    /// when there is nothing to ask about yet.
+    func ask(question: String) async throws -> AskAnswer {
+        guard let context = await askContext() else { throw AskError.noTranscript }
+        return try await groqClient.ask(question: question, transcript: context.transcript,
+                                        segments: context.segments, meetingDate: context.date)
+    }
+
+    /// Three suggested questions drawn from what was actually discussed.
+    func suggestedQuestions() async throws -> [String] {
+        guard let context = await askContext() else { throw AskError.noTranscript }
+        return try await groqClient.suggestedQuestions(transcript: context.transcript,
+                                                       segments: context.segments,
+                                                       meetingDate: context.date)
     }
 
     // MARK: - Review (Upload / Discard)

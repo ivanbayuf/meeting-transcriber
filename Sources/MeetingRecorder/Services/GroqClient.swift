@@ -251,22 +251,30 @@ final class GroqClient: @unchecked Sendable {
 
     /// One JSON-mode chat call: waits and retries on 429 (Groq says how long), then
     /// falls back to the other model; also falls back on Groq server errors.
+    /// Summaries keep their system prompt through `chatJSON`; Ask uses the same
+    /// retry/fallback behaviour with its own prompt via `chat`.
     private func chatJSON(_ prompt: String) async throws -> String {
+        try await chat(prompt, systemPrompt: summarySystemPrompt)
+    }
+
+    /// Same retry/fallback behaviour as the summary path, with a caller-chosen
+    /// system prompt. Internal so the Ask feature can use it.
+    func chat(_ prompt: String, systemPrompt: String) async throws -> String {
         do {
-            return try await chatJSON(prompt, model: summaryModel)
+            return try await chat(prompt, systemPrompt: systemPrompt, model: summaryModel)
         } catch GroqError.rateLimited {
             logger.warning("Still rate limited, trying fallback: \(self.fallbackSummaryModel, privacy: .public)")
-            return try await chatJSON(prompt, model: fallbackSummaryModel)
+            return try await chat(prompt, systemPrompt: systemPrompt, model: fallbackSummaryModel)
         } catch GroqError.apiError(let code, _) where code >= 500 {
-            return try await chatJSON(prompt, model: fallbackSummaryModel)
+            return try await chat(prompt, systemPrompt: systemPrompt, model: fallbackSummaryModel)
         }
     }
 
-    private func chatJSON(_ prompt: String, model: String) async throws -> String {
+    private func chat(_ prompt: String, systemPrompt: String, model: String) async throws -> String {
         let requestBody = GroqChatRequest(
             model: model,
             messages: [
-                GroqMessage(role: "system", content: summarySystemPrompt),
+                GroqMessage(role: "system", content: systemPrompt),
                 GroqMessage(role: "user", content: prompt)
             ],
             temperature: 0.1,
@@ -283,7 +291,7 @@ final class GroqClient: @unchecked Sendable {
         for attempt in 1...4 {
             let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else { throw GroqError.invalidResponse }
-            logger.info("Summary (\(model, privacy: .public)) HTTP \(httpResponse.statusCode, privacy: .public)")
+            logger.info("Chat (\(model, privacy: .public)) HTTP \(httpResponse.statusCode, privacy: .public)")
 
             if httpResponse.statusCode == 429 {
                 let wait = min(65, max(2, Double(httpResponse.value(forHTTPHeaderField: "retry-after") ?? "") ?? 20))
@@ -294,7 +302,7 @@ final class GroqClient: @unchecked Sendable {
             }
             if httpResponse.statusCode != 200 {
                 let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
-                logger.error("Summary error body: \(errorText, privacy: .public)")
+                logger.error("Chat error body: \(errorText, privacy: .public)")
                 throw GroqError.apiError(httpResponse.statusCode, errorText)
             }
             let chatResponse = try JSONDecoder().decode(GroqChatResponse.self, from: data)
@@ -347,7 +355,8 @@ final class GroqClient: @unchecked Sendable {
         return parts
     }
 
-    private static func isoDate(_ date: Date) -> String {
+    /// Internal so the Ask feature can date its prompts the same way.
+    static func isoDate(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withFullDate]
         return formatter.string(from: date)

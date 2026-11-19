@@ -6,6 +6,10 @@ final class Meeting: Identifiable, Codable, @unchecked Sendable {
     var endDate: Date?
     var title: String
     var transcript: String?
+    /// Whisper segments with start/end times, when the transcript came from a
+    /// full transcription. Nil for older history and for live-pipeline text
+    /// that was never segmented. Ask uses these for source time chips.
+    var segments: [TranscriptionSegment]?
     var summary: MeetingSummary?
     var audioURL: URL?
     var notionPageURL: String?
@@ -25,7 +29,7 @@ final class Meeting: Identifiable, Codable, @unchecked Sendable {
     // Explicit keys + decoder so history saved by older builds (without the
     // output fields) still decodes. Encoding stays synthesized.
     private enum CodingKeys: String, CodingKey {
-        case id, startDate, endDate, title, transcript, summary, audioURL, notionPageURL, status
+        case id, startDate, endDate, title, transcript, segments, summary, audioURL, notionPageURL, status
         case markdownFileURL, clipboardCopied
     }
 
@@ -36,6 +40,7 @@ final class Meeting: Identifiable, Codable, @unchecked Sendable {
         endDate = try c.decodeIfPresent(Date.self, forKey: .endDate)
         title = try c.decode(String.self, forKey: .title)
         transcript = try c.decodeIfPresent(String.self, forKey: .transcript)
+        segments = try c.decodeIfPresent([TranscriptionSegment].self, forKey: .segments)
         summary = try c.decodeIfPresent(MeetingSummary.self, forKey: .summary)
         audioURL = try c.decodeIfPresent(URL.self, forKey: .audioURL)
         notionPageURL = try c.decodeIfPresent(String.self, forKey: .notionPageURL)

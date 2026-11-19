@@ -16,14 +16,21 @@ actor LivePipeline {
 
     private var tail: Task<Void, Never>?
     private var transcripts: [Int: String] = [:]
+    /// Whisper segments per chunk, shifted to meeting time (chunk `i` starts
+    /// at `i * segmentDuration`). Kept so Ask can cite moments while the
+    /// meeting is still running.
+    private var segmentStore: [Int: [TranscriptionSegment]] = [:]
     private var partials: [(index: Int, json: String)] = []
     private var failed = false
     private var sawLast = false
+    /// Seconds per recorded chunk (AudioRecorder rotates every 600s by default).
+    private let segmentDuration: TimeInterval
 
-    init(groq: GroqClient, language: String?, meetingDate: Date) {
+    init(groq: GroqClient, language: String?, meetingDate: Date, segmentDuration: TimeInterval = 600) {
         self.groq = groq
         self.language = language
         self.meetingDate = meetingDate
+        self.segmentDuration = segmentDuration
     }
 
     /// Safe to call from the audio queue.
@@ -44,8 +51,14 @@ actor LivePipeline {
         guard !failed else { return }
         do {
             let text: String
+            let offset = Double(index) * segmentDuration
             do {
-                text = try await groq.transcribe(audioURL: url, language: language).text
+                let result = try await groq.transcribe(audioURL: url, language: language)
+                text = result.text
+                segmentStore[index] = (result.segments ?? []).map {
+                    TranscriptionSegment(id: $0.id, start: $0.start + offset,
+                                         end: $0.end + offset, text: $0.text, speaker: $0.speaker)
+                }
             } catch GroqError.emptyAudio {
                 text = "" // a near-empty final chunk is fine
             }
@@ -62,15 +75,29 @@ actor LivePipeline {
         }
     }
 
-    /// Waits for the last chunk, then returns the full transcript and the part notes
-    /// in order — or nil if anything failed.
-    func finish() async -> (transcript: String, partials: [String])? {
+    /// Transcript so far (finished chunks in order) with their segments,
+    /// for Ask while the meeting is still recording. Empty when nothing has
+    /// been transcribed yet.
+    func partialTranscript() async -> (text: String, segments: [TranscriptionSegment]) {
+        await tail?.value
+        let text = transcripts.sorted { $0.key < $1.key }.map(\.value)
+            .joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        let segments = segmentStore.sorted { $0.key < $1.key }.flatMap(\.value)
+            .sorted { $0.start < $1.start }
+        return (text, segments)
+    }
+
+    /// Waits for the last chunk, then returns the full transcript, the part
+    /// notes, and the timestamped segments in order — or nil if anything failed.
+    func finish() async -> (transcript: String, partials: [String], segments: [TranscriptionSegment])? {
         // The final chunk is handed over as recording stops; give it a moment to arrive.
         for _ in 0..<100 where !sawLast { try? await Task.sleep(nanoseconds: 50_000_000) }
         await tail?.value
         guard sawLast, !failed else { return nil }
         let transcript = transcripts.sorted { $0.key < $1.key }.map(\.value)
             .joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        return (transcript, partials.sorted { $0.index < $1.index }.map(\.json))
+        let segments = segmentStore.sorted { $0.key < $1.key }.flatMap(\.value)
+            .sorted { $0.start < $1.start }
+        return (transcript, partials.sorted { $0.index < $1.index }.map(\.json), segments)
     }
 }
