@@ -4,6 +4,37 @@ import CryptoKit
 @testable import MeetingRecorder
 
 final class MeetingRecorderTests: XCTestCase {
+    /// A recording cut off by a crash has a header claiming 0 bytes; repair restores it.
+    func testRepairWAVHeaderRecoversCrashedRecording() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true)!
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: true)
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_000))
+            buffer.frameLength = 16_000
+            try file.write(from: buffer)
+        }
+        // Simulate the crash: zero the RIFF and data sizes, as before the file was closed.
+        var bytes = try Data(contentsOf: url)
+        let dataAt = try XCTUnwrap(bytes.range(of: Data("data".utf8))).lowerBound
+        bytes.replaceSubrange(4..<8, with: Data(count: 4))
+        bytes.replaceSubrange((dataAt + 4)..<(dataAt + 8), with: Data(count: 4))
+        try bytes.write(to: url)
+        XCTAssertThrowsError(try AVAudioFile(forReading: url), "a crashed WAV can't even be opened")
+
+        AudioRecorder.repairWAVHeader(at: url)
+        XCTAssertEqual(try AVAudioFile(forReading: url).length, 16_000, "all audio readable again")
+        AudioRecorder.repairWAVHeader(at: url) // idempotent on a valid file
+        XCTAssertEqual(try AVAudioFile(forReading: url).length, 16_000)
+    }
+
+    /// Notion rejects a page if any text item exceeds 2,000 characters.
+    func testNotionTextIsClippedToLimit() {
+        XCTAssertEqual(NotionText(content: String(repeating: "a", count: 5_000)).content.count, 2_000)
+        XCTAssertEqual(NotionText(content: "short").content, "short")
+    }
+
     /// On speakers, the mic is turned down while the other side talks (and briefly after).
     func testEchoGateDucksMicOnlyWhileSystemAudioPlays() {
         var hold = 0

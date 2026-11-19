@@ -235,6 +235,11 @@ struct NotionRichText: Codable {
 
 struct NotionText: Codable {
     let content: String
+
+    /// Notion rejects the whole page if any text item is over 2,000 characters.
+    init(content: String) {
+        self.content = content.count > 2000 ? String(content.prefix(1999)) + "…" : content
+    }
 }
 
 struct NotionBlock: Codable {

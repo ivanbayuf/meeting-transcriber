@@ -24,6 +24,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let meetingManager = MeetingManager.shared
     private let logger = Logger(subsystem: "MeetingRecorder", category: "AppDelegate")
 
+    /// Quit while recording/processing: save the audio first (Retry after relaunch).
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard meetingManager.isRecording || meetingManager.isProcessing else { return .terminateNow }
+        Task { @MainActor in
+            await meetingManager.prepareForQuit()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         logger.info("MeetingRecorder launched")
         // Menu-bar-only app: hide the Dock icon.

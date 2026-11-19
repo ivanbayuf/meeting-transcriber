@@ -145,7 +145,9 @@ final class MeetingManager: ObservableObject {
                 return true
             }
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            groqKeyState = .error("Groq check failed (HTTP \(code)). Check the key.")
+            groqKeyState = .error(code == 429
+                ? "Groq limit reached — the key is fine, try again in a few minutes."
+                : "Groq check failed (HTTP \(code)). Check the key.")
             return false
         } catch {
             groqKeyState = .error("Couldn’t reach Groq. Check your connection and try again.")
@@ -176,7 +178,7 @@ final class MeetingManager: ObservableObject {
         }
         notionConnectState = .connecting
         notionError = nil
-        notionDatabaseID = ""
+        // The working database stays until the new connection succeeds.
         notionClient.apiToken = token
         do {
             let databaseID = try await notionClient.connectAndSetup(pageID: pageID)
@@ -341,8 +343,14 @@ final class MeetingManager: ObservableObject {
     /// Background work for the recording in progress (nil after it's been used).
     private var livePipeline: LivePipeline?
 
+    /// True from the Record tap until capture has started (covers the mic prompt).
+    private var isStartingRecording = false
+
     func startRecording() async {
-        guard !isRecording, !isProcessing else { return }
+        // A second tap while the first is still starting must not start a second meeting.
+        guard !isRecording, !isProcessing, !isStartingRecording else { return }
+        isStartingRecording = true
+        defer { isStartingRecording = false }
         errorMessage = nil
         lastReport = nil
         micPermissionNeeded = false
@@ -666,15 +674,60 @@ final class MeetingManager: ObservableObject {
     // MARK: - History Persistence
 
     func saveHistory() {
+        // Meetings are classes: title/status changes don't publish on their own.
+        objectWillChange.send()
         if let data = try? JSONEncoder().encode(meetingHistory) {
             UserDefaults.standard.set(data, forKey: "meetingHistory")
         }
+    }
+
+    /// A meeting still "in progress" at launch was cut off by a crash or force-quit.
+    /// Mark it Failed (so Retry works), repair its WAV header, and offer Retry for
+    /// the most recent one.
+    private func recoverInterruptedMeetings() {
+        let interrupted: [MeetingStatus] = [.recording, .transcribing, .summarizing, .saving, .savingToNotion, .retrying]
+        var offered = false
+        for meeting in meetingHistory where interrupted.contains(meeting.status) {
+            meeting.status = .failed
+            if let url = meeting.audioURL {
+                if FileManager.default.fileExists(atPath: url.path) {
+                    AudioRecorder.repairWAVHeader(at: url)
+                } else {
+                    meeting.audioURL = nil
+                }
+            }
+            if !offered, meeting.audioURL != nil || !(meeting.transcript ?? "").isEmpty {
+                offered = true
+                currentMeeting = meeting
+                errorMessage = "The last recording was interrupted. Press Retry to process the audio that was saved."
+            }
+        }
+        saveHistory()
+    }
+
+    /// Quit while recording or processing: finish the audio file and mark the meeting
+    /// Failed so Retry can process it after relaunch. Starts no network work.
+    func prepareForQuit() async {
+        guard let meeting = currentMeeting else { return }
+        if isRecording {
+            audioRecorder.onSegment = nil
+            livePipeline = nil
+            isRecording = false
+            recordingStartedAt = nil
+            meeting.endDate = Date()
+            if let url = await audioRecorder.stopRecording() { meeting.audioURL = url }
+        }
+        if [.recording, .transcribing, .summarizing, .saving].contains(meeting.status) {
+            meeting.status = .failed
+        }
+        saveHistory()
     }
 
     private func loadHistory() {
         if let data = UserDefaults.standard.data(forKey: "meetingHistory"),
            let history = try? JSONDecoder().decode([Meeting].self, from: data) {
             meetingHistory = history
+            recoverInterruptedMeetings()
             // Notes left waiting for Upload/Discard when the app quit: ask again.
             if let waiting = history.first, waiting.status == .ready, waiting.summary != nil {
                 pendingReview = waiting

@@ -114,23 +114,29 @@ final class GroqClient: @unchecked Sendable {
         request.httpBody = body
         logger.info("POST /audio/transcriptions: \(body.count, privacy: .public)-byte multipart body")
         
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            logger.error("Transcription request failed (network): \(error, privacy: .public)")
-            throw error
-        }
-        
-        guard let httpResponse = response as? HTTPURLResponse else {
-            logger.error("Transcription: non-HTTP response")
-            throw GroqError.invalidResponse
-        }
-        logger.info("Transcription HTTP \(httpResponse.statusCode, privacy: .public), \(data.count, privacy: .public) bytes")
-        
-        if httpResponse.statusCode == 429 {
-            throw GroqError.rateLimited
+        var data = Data()
+        var httpResponse: HTTPURLResponse!
+        // On 429 ("slow down") wait as long as Groq says and retry, instead of losing
+        // the chunk (and with it the background work for the whole meeting).
+        for attempt in 1...4 {
+            let response: URLResponse
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch {
+                logger.error("Transcription request failed (network): \(error, privacy: .public)")
+                throw error
+            }
+            guard let http = response as? HTTPURLResponse else {
+                logger.error("Transcription: non-HTTP response")
+                throw GroqError.invalidResponse
+            }
+            httpResponse = http
+            logger.info("Transcription HTTP \(http.statusCode, privacy: .public), \(data.count, privacy: .public) bytes")
+            guard http.statusCode == 429 else { break }
+            if attempt == 4 { throw GroqError.rateLimited }
+            let wait = min(65, max(2, Double(http.value(forHTTPHeaderField: "retry-after") ?? "") ?? 20))
+            logger.info("Transcription rate limited (attempt \(attempt, privacy: .public)); waiting \(wait, privacy: .public)s")
+            try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
         }
         if httpResponse.statusCode != 200 {
             let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"

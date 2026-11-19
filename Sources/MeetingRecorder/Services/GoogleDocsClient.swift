@@ -110,6 +110,21 @@ final class GoogleDocsClient: @unchecked Sendable {
 
     private func ensureFolder(token: String) async throws -> String {
         if !folderID.isEmpty { return folderID }
+        // Reuse the app's existing folder (after a reconnect/reinstall) instead of making
+        // a duplicate. drive.file only lists files this app created, so this finds ours.
+        var search = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
+        search.queryItems = [
+            .init(name: "q", value: "name = '\(Self.folderName)' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"),
+            .init(name: "fields", value: "files(id)"),
+            .init(name: "pageSize", value: "1"),
+        ]
+        var lookup = URLRequest(url: search.url!)
+        lookup.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let existing = ((try? await send(lookup))?["files"] as? [[String: Any]])?.first?["id"] as? String {
+            folderID = existing
+            onFolderCreated?(existing)
+            return existing
+        }
         var request = URLRequest(url: URL(string: "https://www.googleapis.com/drive/v3/files?fields=id")!)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

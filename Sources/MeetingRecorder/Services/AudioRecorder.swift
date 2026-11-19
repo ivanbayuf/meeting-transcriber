@@ -168,6 +168,31 @@ final class AudioRecorder: NSObject, ObservableObject, @unchecked Sendable {
         micEngine = nil
     }
 
+    /// After a crash the WAV header still says "0 bytes of audio" (it's only finalised
+    /// on close). Rewrite the RIFF and data sizes from the real file length so the
+    /// recorded audio can be read and retried. Safe on an already-valid file.
+    static func repairWAVHeader(at url: URL) {
+        guard let handle = try? FileHandle(forUpdating: url) else { return }
+        defer { try? handle.close() }
+        guard let fileSize = try? handle.seekToEnd(), fileSize > 44, fileSize < UInt64(UInt32.max) else { return }
+        try? handle.seek(toOffset: 0)
+        guard let head = try? handle.read(upToCount: 4096), head.count >= 12,
+              head.prefix(4) == Data("RIFF".utf8), head[8..<12] == Data("WAVE".utf8) else { return }
+        func le32(_ value: UInt32) -> Data { withUnsafeBytes(of: value.littleEndian) { Data($0) } }
+        var offset = 12 // walk the chunks to "data"
+        while offset + 8 <= head.count {
+            let chunkSize = Int(head[(offset + 4)..<(offset + 8)].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.littleEndian)
+            if head[offset..<(offset + 4)] == Data("data".utf8) {
+                try? handle.seek(toOffset: 4)
+                try? handle.write(contentsOf: le32(UInt32(fileSize - 8)))
+                try? handle.seek(toOffset: UInt64(offset + 4))
+                try? handle.write(contentsOf: le32(UInt32(Int(fileSize) - offset - 8)))
+                return
+            }
+            offset += 8 + chunkSize + (chunkSize & 1)
+        }
+    }
+
     /// Echo gate (speakers only): while the system tap carries sound, the mic hears it
     /// again from the speakers. Turn the mic down to 10% then, and for 0.3 s after
     /// (the room's echo tail). Cost: your voice is quieter while talking over others.
