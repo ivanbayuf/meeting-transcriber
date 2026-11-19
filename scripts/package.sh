@@ -1,13 +1,13 @@
 #!/bin/bash
-# Builds dist/Meeting Transcriber.app and dist/MeetingTranscriber.dmg from source.
+# Builds dist.noindex/Meeting Transcriber.app and dist.noindex/MeetingTranscriber.dmg from source.
 # Usage: scripts/package.sh            (run from anywhere)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-APP="dist/Meeting Transcriber.app"
+APP="dist.noindex/Meeting Transcriber.app"
 swift build -c release
 
-rm -rf dist && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+rm -rf dist.noindex && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/MeetingRecorder "$APP/Contents/MacOS/MeetingRecorder"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/MeetingRecorder.icns "$APP/Contents/Resources/MeetingRecorder.icns"
@@ -29,7 +29,7 @@ STAGE=$(mktemp -d)
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 cp DMG-README.txt "$STAGE/READ ME FIRST.txt"
-hdiutil create -quiet -volname "Meeting Transcriber" -srcfolder "$STAGE" -ov -format UDZO dist/MeetingTranscriber.dmg
-hdiutil verify -quiet dist/MeetingTranscriber.dmg
+hdiutil create -quiet -volname "Meeting Transcriber" -srcfolder "$STAGE" -ov -format UDZO dist.noindex/MeetingTranscriber.dmg
+hdiutil verify -quiet dist.noindex/MeetingTranscriber.dmg
 rm -rf "$STAGE"
-echo "Built dist/MeetingTranscriber.dmg"
+echo "Built dist.noindex/MeetingTranscriber.dmg"

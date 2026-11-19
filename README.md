@@ -67,7 +67,7 @@ Requires macOS 14.2+ and Xcode 15+ command-line tools.
 scripts/package.sh
 ```
 
-This builds `dist/Meeting Transcriber.app` and `dist/MeetingTranscriber.dmg`.
+This builds `dist.noindex/Meeting Transcriber.app` and `dist.noindex/MeetingTranscriber.dmg` (`.noindex` keeps Spotlight from listing a second copy of the app).
 The app is ad-hoc signed, so macOS may ask for System Audio Recording and
 Microphone permission again after each new build.
 
