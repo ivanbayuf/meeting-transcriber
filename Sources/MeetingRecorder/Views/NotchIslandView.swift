@@ -798,7 +798,12 @@ struct NotchIslandView: View {
     private func scheduleNudge() {
         nudgeTask?.cancel()
         guard let start = manager.recordingStartedAt else { return }
-        let delay = max(0, 600 - Date().timeIntervalSince(start))
+        // DEBUG override: `defaults write com.ivanbayu.meetingrecorder
+        // debugNudgeAfterSeconds -double 20` fires the nudge 20s in, for
+        // testing, instead of at 10 minutes. Set it before recording starts.
+        let debugDelay = UserDefaults.standard.double(forKey: "debugNudgeAfterSeconds")
+        let target: TimeInterval = debugDelay > 0 ? debugDelay : 600
+        let delay = max(0, target - Date().timeIntervalSince(start))
         nudgeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, manager.isRecording,
