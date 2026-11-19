@@ -4,8 +4,9 @@ import SwiftUI
 ///
 /// Same language as the rest of the island: pure black card, 12pt text, 10pt
 /// semibold caps labels, 24pt icon controls, press-scale feedback. The pane
-/// answers only from the transcript (see AskAssistant.swift): every answer
-/// carries the verbatim quotes it rests on, each with its time in the meeting.
+/// answers from the transcript once there is one — and from the app itself
+/// before that (see AskAssistant.swift). Transcript answers carry the
+/// verbatim quotes they rest on, each with its time in the meeting.
 @MainActor
 final class AskViewModel: ObservableObject {
     @Published var suggestions: [String] = []
@@ -66,7 +67,6 @@ struct AskPane: View {
     var reveal: Bool
     var width: CGFloat
     var bottomBar: AnyView
-    var onClose: () -> Void
 
     @FocusState private var inputFocused: Bool
 
@@ -124,33 +124,24 @@ struct AskPane: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 2) {
+            // No back button here: the main chevron (top right) is the way
+            // back — Ask → the page it came from, then collapse.
             HStack(spacing: 6) {
-                Button(action: onClose) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.7))
-                        .frame(width: 24, height: 24)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PressScaleStyle())
-                .accessibilityLabel("Back")
                 Image(systemName: "sparkle")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Color.purple.opacity(0.9))
+                    .foregroundStyle(Color.blue.opacity(0.9))
                 Text("Ask about this meeting")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.white)
             }
             .frame(height: 24)
-            Text("Answers come only from the transcript.")
+            Text("Answers come from the transcript — or the app, before it's ready.")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.white.opacity(0.45))
-                .padding(.leading, 8)
             if let note = viewModel.coverageNote {
                 Text(note)
                     .font(.system(size: 11))
                     .foregroundStyle(Color.white.opacity(0.45))
-                    .padding(.leading, 8)
             }
         }
         .padding(.horizontal, 8)
@@ -160,22 +151,13 @@ struct AskPane: View {
 
     private var suggestionsView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // The button stays tappable before anything is transcribed, so
-            // the pane says so itself instead of leaving a dead button.
-            if !manager.canAsk {
-                Text("Nothing to ask about yet — record for a bit first. Ask unlocks once the first part is transcribed.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.white.opacity(0.45))
-                    .padding(.top, 2)
-            }
-
             Button {
                 Task { await viewModel.loadSuggestions() }
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "sparkle")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.purple.opacity(0.9))
+                        .foregroundStyle(Color.blue.opacity(0.9))
                     Text("What should I ask?")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Color.white)
@@ -207,7 +189,7 @@ struct AskPane: View {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "sparkle")
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Color.purple.opacity(0.7))
+                            .foregroundStyle(Color.blue.opacity(0.7))
                             .padding(.top, 2)
                         Text(suggestion)
                             .font(.system(size: 12))
@@ -239,7 +221,7 @@ struct AskPane: View {
         HStack(spacing: 8) {
             ProgressView()
                 .controlSize(.small)
-            Text("Checking the transcript…")
+            Text("Thinking…")
                 .font(.system(size: 12))
                 .foregroundStyle(Color.white.opacity(0.6))
         }
@@ -271,7 +253,7 @@ struct AskPane: View {
                                 .foregroundStyle(Color.white.opacity(0.9))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 3)
-                                .background(Color.purple.opacity(0.3))
+                                .background(Color.blue.opacity(0.3))
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                         Text(source.quote)

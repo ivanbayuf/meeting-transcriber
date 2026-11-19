@@ -378,8 +378,7 @@ struct NotchIslandView: View {
     /// hidden to visible with a 0.05s step (staggeredReveal); on collapse they
     /// all exit fast without stagger.
     @State private var reveal = false
-    // Hover state drives target scale and recording waveform/stop swap.
-    @State private var recordHovering = false
+    // Hover state drives target scale (chevron, Ask, clock).
     @State private var chevronHovering = false
     @State private var clockHovering = false
     @State private var askHovering = false
@@ -468,9 +467,20 @@ struct NotchIslandView: View {
             // VStack) so an outgoing and incoming body overlap during a crossfade.
             ZStack(alignment: .top) {
                 if open {
-                    page(content)
-                        .id(content)
-                        .transition(contentTransition)
+                    VStack(spacing: 0) {
+                        // Tab strip (Notes / Ask / History) above the page:
+                        // the user can always switch panes, and History is
+                        // reachable from Ask too. The chevron stays
+                        // expand/collapse only. Transient panes (processing,
+                        // review, success, failure) hold the card and show
+                        // no tabs.
+                        if isTabbedPane(content) {
+                            tabStrip(content: content)
+                        }
+                        page(content)
+                            .id(content)
+                            .transition(contentTransition)
+                    }
                 }
             }
             .frame(width: metrics.expandedWidth, alignment: .top)
@@ -547,7 +557,7 @@ struct NotchIslandView: View {
 
     private func bodyHeight(_ content: Pane) -> CGFloat {
         switch content {
-        case .outputs, .history, .ask: return IslandMetrics.maxBodyHeight
+        case .outputs, .history, .ask: return IslandMetrics.maxBodyHeight + tabStripHeight
         case .processing: return 40
         // 4 top + 24 headline + 16 title + 16 details + 10 + 26 buttons + 12 bottom.
         case .review: return 108
@@ -572,17 +582,17 @@ struct NotchIslandView: View {
     /// and recording. On a notched screen the camera housing sits in the
     /// Spacer between the wings. Ask is ALWAYS tappable (except while a
     /// pipeline or blocker holds the card, or with no Groq key) — before the
-    /// first chunk is transcribed the pane opens and says so, instead of the
-    /// button sitting there dead with no explanation.
+    /// first chunk is transcribed the pane opens with generic questions and
+    /// a form that answers from the app, instead of the button sitting
+    /// there dead with no explanation.
     ///
-    /// Each interactive target scales on hover; island-level continuous hover
-    /// still controls collapse grace.
+    /// Ask, the chevron and the clock scale on hover; the record control
+    /// does not. Island-level continuous hover still controls collapse grace.
     private func topRow(open: Bool, content: Pane, recording: Bool) -> some View {
         HStack(spacing: 0) {
+            // No hover scale on the record control: it must never grow or
+            // shift under the pointer (the label and waveform stay put).
             recordControl(open: open)
-                .modifier(ElementHoverScale(isHovering: $recordHovering,
-                                            enabled: !manager.isProcessing && groqKeyValid,
-                                            cornerRadius: metrics.controlCornerRadius))
             Spacer(minLength: 0)
             HStack(spacing: 4) {
                 askButton(content: content)
@@ -625,14 +635,14 @@ struct NotchIslandView: View {
         }
     }
 
-    /// Icon-only Ask button: sparkles in the same 24pt box as the chevron,
-    /// directly to its left. Opens the Ask pane; the pane's own back chevron
-    /// (or the main chevron) closes it.
+    /// Icon-only Ask button: a blue star in the same 24pt box as the chevron,
+    /// directly to its left. Opens the Ask pane; the tab strip (or the
+    /// chevron, to collapse) is the way back.
     private func askButton(content: Pane) -> some View {
         Button { model.openAsk() } label: {
             Image(systemName: "sparkle")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.white.opacity(content == .ask ? 0.9 : 0.55))
+                .foregroundStyle(Color.blue.opacity(content == .ask ? 0.9 : 0.55))
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
         }
@@ -726,8 +736,77 @@ struct NotchIslandView: View {
     /// controls stay reachable while asking.
     private var askPage: some View {
         AskPane(viewModel: askViewModel, manager: manager, reveal: reveal,
-                width: metrics.expandedWidth, bottomBar: AnyView(bottomBar)) {
+                width: metrics.expandedWidth, bottomBar: AnyView(bottomBar))
+    }
+
+    // MARK: Tab strip (Notes / Ask / History)
+
+    /// Height of the tab strip (26pt chips + 4pt top + 6pt bottom). The card
+    /// grows by this much on the tabbed panes; the pages keep their height.
+    private var tabStripHeight: CGFloat { 36 }
+
+    /// Tabs show on the three main panes only — the places the user can
+    /// freely switch between. Transient panes pin the card.
+    private func isTabbedPane(_ pane: Pane) -> Bool {
+        pane == .outputs || pane == .history || pane == .ask
+    }
+
+    /// Notes / Ask / History chips above the page. Selecting a tab closes
+    /// Ask when leaving it, so History (and Notes) are reachable from Ask —
+    /// the bottom bar's History button does the same.
+    private func tabStrip(content: Pane) -> some View {
+        HStack(spacing: 6) {
+            tabChip(title: "Notes", icon: "doc.text", selected: content == .outputs) {
+                showTab(.outputs)
+            }
+            tabChip(title: "Ask", icon: "sparkle", selected: content == .ask) {
+                showTab(.ask)
+            }
+            tabChip(title: "History", icon: "clock.arrow.circlepath", selected: content == .history) {
+                showTab(.history)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        .padding(.bottom, 6)
+    }
+
+    private func tabChip(title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .medium))
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(selected ? Color.white.opacity(0.95) : Color.white.opacity(0.55))
+            .padding(.horizontal, 12)
+            .frame(height: 26)
+            .background(selected
+                        ? Color.white.opacity(0.12)
+                        : Color.white.opacity(0.05))
+            .clipShape(Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(PressScaleStyle())
+        .accessibilityLabel(title)
+    }
+
+    /// Switches the main pane. Ask opens via openAsk; leaving Ask closes
+    /// it so the underlying page actually shows.
+    private func showTab(_ tab: Pane) {
+        switch tab {
+        case .ask:
+            model.openAsk()
+        case .history:
             model.closeAsk()
+            model.page = .history
+        case .outputs:
+            model.closeAsk()
+            model.page = .main
+        default:
+            break
         }
     }
 
@@ -848,12 +927,20 @@ struct NotchIslandView: View {
                 Spacer(minLength: 0)
                 if !manager.meetingHistory.isEmpty {
                     IslandIconButton(systemName: "clock.arrow.circlepath", help: "History (\(manager.meetingHistory.count))") {
+                        // Leaving Ask closes it, or the page switch below
+                        // would be swallowed (Ask outranks the page).
+                        model.closeAsk()
                         model.page = .history
                     }
                 }
             } else {
                 if !manager.meetingHistory.isEmpty {
-                    Button { model.page = .history } label: {
+                    Button {
+                        // Leaving Ask closes it, or the page switch below
+                        // would be swallowed (Ask outranks the page).
+                        model.closeAsk()
+                        model.page = .history
+                    } label: {
                         Label("History (\(manager.meetingHistory.count))", systemImage: "clock.arrow.circlepath")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(Color.white.opacity(0.7))
@@ -1173,13 +1260,15 @@ struct GroqOnboardingCard: View {
 
 /// The record/stop control in the top-left wing.
 /// Item 19: NO red circle background. Glyph is RED while recording, WHITE while idle.
-/// Item 38: the parent topRow applies the scale hover affordance.
 /// Item 13: Disabled (greyed) when groqKeyValid is false.
+/// No scale animation on this control: no hover grow, no press shrink —
+/// the label and waveform never shift under the pointer (the icon still
+/// morphs mic → stop inside its 24pt box).
 /// Balance: the control carries a label that matches the right wing's two
 /// icons — "Rec." beside the mic while idle, "Stop" beside the stop square
 /// while recording, with the live waveform after it (no more hover-to-reveal
-/// the stop; everything is always visible). Spacing is 4pt between icon,
-/// label and waveform so nothing crowds the notch. Processing shows only
+/// the stop; everything is always visible). Spacing is 2pt between icon,
+/// label and waveform — one tight control. Processing shows only
 /// the spinner.
 struct RecordControlButton: View {
     var isRecording: Bool
@@ -1198,7 +1287,7 @@ struct RecordControlButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 4) {
+            HStack(spacing: 2) {
                 // The icon morphs mic → stop (and back) with the existing
                 // scale+blur crossfade, on one spring.
                 ZStack {
@@ -1237,7 +1326,8 @@ struct RecordControlButton: View {
             .animation(reduceMotion ? IslandMotion.reducedFade : .easeOut(duration: 0.2), value: isRecording)
             .contentShape(Rectangle())
         }
-        .buttonStyle(PressScaleStyle())
+        // Plain: no press scale — the control never shrinks on tap.
+        .buttonStyle(.plain)
         // item 13 island: disable while Groq key missing/invalid; also while processing
         .disabled(isProcessing || !groqKeyValid)
         .help(isRecording ? "Stop recording" : (groqKeyValid ? "Start recording" : "Add a Groq API key to record"))
