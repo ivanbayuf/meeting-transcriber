@@ -134,7 +134,7 @@ struct AskPane: View {
                 }
                 .buttonStyle(PressScaleStyle())
                 .accessibilityLabel("Back")
-                Image(systemName: "sparkles")
+                Image(systemName: "sparkle")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Color.purple.opacity(0.9))
                 Text("Ask about this meeting")
@@ -173,7 +173,7 @@ struct AskPane: View {
                 Task { await viewModel.loadSuggestions() }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "sparkles")
+                    Image(systemName: "sparkle")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Color.purple.opacity(0.9))
                     Text("What should I ask?")
@@ -196,14 +196,16 @@ struct AskPane: View {
                 .contentShape(RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(PressScaleStyle())
-            .disabled(viewModel.isLoadingSuggestions)
+            // Suggestions need a transcript to suggest from; the form below
+            // stays usable without one.
+            .disabled(viewModel.isLoadingSuggestions || !manager.canAsk)
 
             ForEach(viewModel.suggestions, id: \.self) { suggestion in
                 Button {
                     Task { await viewModel.ask(suggestion) }
                 } label: {
                     HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "sparkles")
+                        Image(systemName: "sparkle")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(Color.purple.opacity(0.7))
                             .padding(.top, 2)
@@ -222,7 +224,7 @@ struct AskPane: View {
                 .buttonStyle(PressScaleStyle())
             }
 
-            if viewModel.suggestions.isEmpty && !viewModel.isLoadingSuggestions {
+            if viewModel.suggestions.isEmpty && !viewModel.isLoadingSuggestions && manager.canAsk {
                 Text("Ask anything about what's been said so far — decisions, commitments, open items.")
                     .font(.system(size: 11))
                     .foregroundStyle(Color.white.opacity(0.45))
@@ -286,7 +288,8 @@ struct AskPane: View {
 
     private var inputRow: some View {
         HStack(spacing: 8) {
-            TextField(viewModel.hasAnswer ? "Ask another question…" : "Ask a question…",
+            TextField(viewModel.hasAnswer ? "Ask another question…"
+                        : (manager.canAsk ? "Ask a question…" : "Ask about the meeting or the app…"),
                       text: $viewModel.input)
                 .font(.system(size: 13))
                 .foregroundStyle(Color.white)

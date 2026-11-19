@@ -630,7 +630,7 @@ struct NotchIslandView: View {
     /// (or the main chevron) closes it.
     private func askButton(content: Pane) -> some View {
         Button { model.openAsk() } label: {
-            Image(systemName: "sparkles")
+            Image(systemName: "sparkle")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Color.white.opacity(content == .ask ? 0.9 : 0.55))
                 .frame(width: 24, height: 24)
@@ -1178,7 +1178,7 @@ struct GroqOnboardingCard: View {
 /// Balance: the control carries a label that matches the right wing's two
 /// icons — "Rec." beside the mic while idle, "Stop" beside the stop square
 /// while recording, with the live waveform after it (no more hover-to-reveal
-/// the stop; everything is always visible). Spacing is 8pt between icon,
+/// the stop; everything is always visible). Spacing is 4pt between icon,
 /// label and waveform so nothing crowds the notch. Processing shows only
 /// the spinner.
 struct RecordControlButton: View {
@@ -1198,7 +1198,7 @@ struct RecordControlButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
                 // The icon morphs mic → stop (and back) with the existing
                 // scale+blur crossfade, on one spring.
                 ZStack {

@@ -134,6 +134,34 @@ extension GroqClient {
         return Array(decoded.questions.prefix(3))
     }
 
+    /// Answers from the app/meeting context (no transcript yet): the form
+    /// stays usable while the meeting is young — it helps the user navigate
+    /// the meeting from what the app knows right now. No sources: there is
+    /// no transcript to quote. Once a transcript exists the caller uses
+    /// `ask` instead, so transcript answers always win.
+    func askAboutApp(question: String, context: String) async throws -> AskAnswer {
+        let json: String
+        do {
+            json = try await chat(
+                """
+                App context (what the Meeting Transcriber app knows right now):
+                \(context)
+
+                Question: \(question)
+
+                Answer the question using ONLY the app context above. Reply in the question's language.
+                """,
+                systemPrompt: Self.appContextSystemPrompt, failFastOnRateLimit: true)
+        } catch GroqError.rateLimited {
+            throw AskError.rateLimited
+        }
+        guard let data = json.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(AskAnswerJSON.self, from: data) else {
+            throw AskError.badAnswer
+        }
+        return AskAnswer(answer: decoded.answer, sources: [])
+    }
+
     /// Max verbatim transcript characters in one Ask call — the free Groq
     /// per-minute token budget caps the context.
     static let maxAskChars = 24_000
@@ -274,5 +302,20 @@ extension GroqClient {
         - Each question must be answerable from the transcript — ask about what was actually discussed, decided, or left open.
         - Prefer decisions, commitments (who does what by when), and unresolved items.
         - Keep each question under 12 words. No preamble, no numbering inside the strings.
+        """
+
+    private static let appContextSystemPrompt = """
+        You are the assistant inside the Meeting Transcriber Mac app. The user is asking about the meeting or the app itself — not about what was said (there is no transcript yet).
+        Output ONLY valid JSON matching this exact schema:
+        {
+          "answer": "string - the answer, in the question's language. If the app context does not contain the answer, say so plainly and suggest what the user can do in the app instead.",
+          "sources": []
+        }
+
+        Rules:
+        - Answer ONLY from the app context provided. Never invent meeting content, names, dates, or numbers.
+        - Keep the answer short and practical: what to tap, where things go, how long something has been running.
+        - Never claim a transcript exists or quote one — there is none yet. If the question is about what was said in the meeting, say the transcript isn't ready yet and the user should keep recording.
+        - "sources" is always empty.
         """
 }

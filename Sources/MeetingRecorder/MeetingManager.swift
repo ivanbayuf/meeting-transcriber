@@ -564,14 +564,19 @@ final class MeetingManager: ObservableObject {
         return hasLiveTranscript
     }
 
-    /// Answers one question from the transcript. Throws `AskError.noTranscript`
-    /// when there is nothing to ask about yet.
+    /// Answers one question. With a transcript it answers from the
+    /// transcript (`ask`); without one it answers from the app/meeting
+    /// context instead — the form stays usable while the meeting is still
+    /// young, and only `suggestedQuestions` needs a transcript.
     func ask(question: String) async throws -> AskAnswer {
-        guard let context = await askContext() else { throw AskError.noTranscript }
-        askCoverageNote = context.coverage
-        return try await groqClient.ask(question: question, transcript: context.transcript,
-                                        segments: context.segments, meetingDate: context.date,
-                                        summary: context.summary)
+        if let context = await askContext() {
+            askCoverageNote = context.coverage
+            return try await groqClient.ask(question: question, transcript: context.transcript,
+                                            segments: context.segments, meetingDate: context.date,
+                                            summary: context.summary)
+        }
+        askCoverageNote = "Answering from the app — no transcript yet."
+        return try await groqClient.askAboutApp(question: question, context: appContextText())
     }
 
     /// Three suggested questions drawn from what was actually discussed.
@@ -606,6 +611,31 @@ final class MeetingManager: ObservableObject {
             return "Long meeting — answers use the whole-meeting summary plus the parts most relevant to your question."
         }
         return nil
+    }
+
+    /// App/meeting context for Ask when there is no transcript yet: what the
+    /// app knows right now, so the free-form form can still help the user
+    /// navigate the meeting (how long it's been recording, where the notes
+    /// will go, what the controls do). Small by design — a few lines, not
+    /// the transcript.
+    private func appContextText() -> String {
+        var lines: [String] = []
+        if isRecording, let start = recordingStartedAt {
+            let elapsed = Int(Date().timeIntervalSince(start))
+            lines.append("Recording in progress, \(elapsed / 60) min \(elapsed % 60) s so far.")
+        } else if let meeting = currentMeeting {
+            lines.append("Not recording. Last meeting: “\(meeting.title)”, status \(meeting.status.rawValue).")
+        } else {
+            lines.append("Not recording, no meeting yet.")
+        }
+        if let destination = activeDestination {
+            lines.append("Notes will go to \(destination.title).")
+        } else {
+            lines.append("No output destination is set up yet — notes will stay in History.")
+        }
+        lines.append("History holds \(meetingHistory.count) meeting(s).")
+        lines.append("The island's sparkle button opens this Ask pane. The record control starts and stops recording; the chevron expands or collapses the island.")
+        return lines.joined(separator: "\n")
     }
 
     /// Compact whole-meeting text for Ask's long-meeting path: title, one-line
