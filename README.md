@@ -1,17 +1,28 @@
 # Meeting Transcriber
 
-**The simplest meeting notes app for macOS.** Press record in the notch, have your
-meeting, and get clean minutes in Notion, Google Docs, Markdown or your clipboard.
-One free Groq key, nothing to download, no setup beyond that.
+**The simplest meeting notes app for macOS — now with Ask.** Press record in the notch, have your
+meeting, and get clean minutes in Notion, Google Docs, Markdown or your clipboard. Then ask your
+meeting anything — live, while you talk, or after: answers come from the transcript, with the exact
+quotes and times they rest on, and terms the meeting only mentions are explained and labelled as
+general knowledge. One free Groq key, nothing to download, no setup beyond that.
 
 <p align="center">
-  <img src="docs/preview/demo.gif" width="760" alt="Screen recording of Meeting Transcriber in the notch: recording a call with a live waveform, transcribing, saving to Notion, then the Send notes to panel with Notion, Google Docs, Markdown and clipboard.">
+  <img src="docs/preview/ask-demo.gif" width="760" alt="Ask about this meeting: the island expands from the notch, the Suggestions list opens, a question is asked, and the answer streams in with its sources and times in the meeting.">
 </p>
+
+*New in 1.5.0 — Ask is live during the call, summaries follow the amount of talk, and your Q&A goes out with the notes.*
 
 ## Why it's different
 
+- **Ask your meeting anything, live.** Ask during the call or after it. Asking cuts the recording
+  chunk, so answers cover the meeting up to the moment you ask — grounded in the transcript, with
+  the verbatim quotes it rests on and their time in the meeting, so you can check it in one click.
+  No more re-listening to find who said what, and no more guessing whether the AI made it up. Terms
+  the meeting only mentions are explained and labelled as general knowledge, and your questions and
+  answers travel out with the notes.
 - **Lives in the notch.** A black island under your menu bar: tap the mic to record,
-  watch the waveform move with the conversation, hover it to stop.
+  watch the waveform move with the conversation, hover it to stop. When the card is open, a soft
+  glow drifts along its bottom edge with the sound.
 - **Notes go where you already work.** Notion, Google Docs, a Markdown folder or the
   clipboard — pick once. Google and Notion connect with a sign-in, no exporting.
 - **Minutes, not a transcript dump.** Every meeting becomes the same tidy page:
@@ -19,8 +30,10 @@ One free Groq key, nothing to download, no setup beyond that.
   with an AI-written title so your pages aren't all called "Meeting".
 - **You decide what gets saved.** When the notes are ready, choose **Upload** or
   **Discard** — discarding deletes the recording, transcript and notes for good.
-- **Long meetings just work.** Every 10 minutes is transcribed and summarised in the
-  background while you talk, so even a 2-hour meeting is ready seconds after you stop.
+- **Long meetings just work.** As you talk, the meeting is transcribed and summarised in the
+  background — a batch summarises once about 6,000 characters of transcript have built up, so
+  silence adds nothing and busy talk summarises sooner — and even a 2-hour meeting is ready
+  seconds after you stop.
 - **Records the whole call.** System audio (Meet, Teams, Zoom, Bluetooth headsets)
   plus your mic — no Screen Recording permission needed.
 - **Light and free to run.** No 1 GB model to download; runs on any Apple-silicon Mac
@@ -38,10 +51,18 @@ One free Groq key, nothing to download, no setup beyond that.
 
 1. **Pick where notes go, then press record** — the island under your notch.
 2. **It records the call and your mic** — the waveform follows the voices.
-3. **Long meetings are summarised as you talk** — 10 minutes at a time, in the background.
+3. **Long meetings are summarised as you talk** — in the background, once enough has been said.
 4. **Notes ready** — check the title and what's in it, then Upload or Discard.
 5. **Saved** — one click opens the page.
 6. **Clean minutes** — purpose, key points, decisions, action items you can tick off.
+7. **Ask about it, live or after** — open Ask and question the meeting: what was decided, who owns what,
+   what was actually said — answered from the transcript, with quotes and times.
+
+The whole flow, from record to saved minutes:
+
+<p align="center">
+  <img src="docs/preview/demo.gif" width="760" alt="Screen recording of Meeting Transcriber in the notch: recording a call with a live waveform, transcribing, saving to Notion, then the Send notes to panel with Notion, Google Docs, Markdown and clipboard.">
+</p>
 
 ## Install
 
@@ -67,7 +88,7 @@ Requires macOS 14.2+ and Xcode 15+ command-line tools.
 scripts/package.sh
 ```
 
-This builds `dist.noindex/Meeting Transcriber.app` and `dist.noindex/MeetingTranscriber.dmg` (`.noindex` keeps Spotlight from listing a second copy of the app).
+This builds `dist/Meeting Transcriber.app` and `dist/MeetingTranscriber.dmg`.
 The app is ad-hoc signed, so macOS may ask for System Audio Recording and
 Microphone permission again after each new build.
 
