@@ -11,8 +11,8 @@ import SwiftUI
 final class AskViewModel: ObservableObject {
     @Published var suggestions: [String] = []
     @Published var isLoadingSuggestions = false
-    @Published var currentQuestion: String?
-    @Published var answer: AskAnswer?
+    /// The conversation so far, oldest first; the pane shows it as chat bubbles.
+    @Published var turns: [AskTurn] = []
     @Published var isAsking = false
     @Published var errorMessage: String?
     @Published var input = ""
@@ -24,8 +24,6 @@ final class AskViewModel: ObservableObject {
     weak var manager: MeetingManager?
 
     func bind(_ manager: MeetingManager) { self.manager = manager }
-
-    var hasAnswer: Bool { answer != nil }
 
     /// Suggested questions for the meeting so far. Kept once loaded; the
     /// transcript only grows, so stale suggestions stay usable.
@@ -42,23 +40,32 @@ final class AskViewModel: ObservableObject {
         isLoadingSuggestions = false
     }
 
-    /// Asks one question; a follow-up just replaces the displayed answer.
+    /// Asks one question and appends it to the conversation; earlier
+    /// questions and answers stay above it.
     func ask(_ question: String) async {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isAsking, let manager else { return }
         isAsking = true
         errorMessage = nil
-        currentQuestion = trimmed
-        answer = nil
         input = ""
+        withAnimation(IslandMotion.tabSwap) { turns.append(AskTurn(question: trimmed)) }
+        let index = turns.count - 1
         do {
-            answer = try await manager.ask(question: trimmed)
+            turns[index].answer = try await manager.ask(question: trimmed)
             coverageNote = manager.askCoverageNote
         } catch {
-            errorMessage = error.localizedDescription
+            turns[index].error = error.localizedDescription
         }
         isAsking = false
     }
+}
+
+/// One question and its reply (nil while waiting).
+struct AskTurn: Identifiable {
+    let id = UUID()
+    let question: String
+    var answer: AskAnswer?
+    var error: String?
 }
 
 struct AskPane: View {
@@ -66,55 +73,60 @@ struct AskPane: View {
     @ObservedObject var manager: MeetingManager
     var reveal: Bool
     var width: CGFloat
-    var bottomBar: AnyView
 
     @FocusState private var inputFocused: Bool
+    @State private var showSuggestions = false
+    @State private var hoveredSuggestion: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
                 .modifier(NotchIslandView.StaggerReveal(index: 0, active: reveal))
+                // The suggestion list hangs over the chat, so it must draw on top.
+                .zIndex(1)
 
-            // "What should I ask?" is a dropdown: the trigger row, and the
-            // suggestions pop out as a native menu (no chips, no list
-            // taking up pane space). Picking one asks it straight away.
-            suggestionsDropdown
-                .modifier(NotchIslandView.StaggerReveal(index: 1, active: reveal))
-                .padding(.top, 6)
-                .padding(.horizontal, 8)
 
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 10) {
-                    if viewModel.isAsking {
-                        askingRow
-                    } else if let answer = viewModel.answer {
-                        answerView(answer)
-                    } else if manager.canAsk {
-                        Text("Ask anything about what's been said so far — decisions, commitments, open items.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Color.white.opacity(0.45))
-                            .padding(.top, 2)
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(viewModel.turns) { turn in
+                            turnView(turn).id(turn.id)
+                        }
+                        if let error = viewModel.errorMessage {
+                            Text(error)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Color.red.opacity(0.85))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        Color.clear.frame(height: 1).id(Self.bottomID)
                     }
-                    if let error = viewModel.errorMessage {
-                        Text(error)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.red.opacity(0.85))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 8)
                 }
-                .padding(.top, 8)
-                .padding(.horizontal, 8)
+                // Follow the conversation: new question, then its answer.
+                .onChange(of: viewModel.turns.count) { _, _ in scrollToEnd(proxy) }
+                .onChange(of: viewModel.isAsking) { _, _ in scrollToEnd(proxy) }
+                .onAppear { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
             }
+            .overlay {
+                if viewModel.turns.isEmpty && viewModel.errorMessage == nil {
+                    Text("No question yet")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white.opacity(0.3))
+                }
+            }
+            // Soft fade at the edges so a long answer reads as scrollable.
+            .mask(VStack(spacing: 0) {
+                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 8)
+                Color.black
+                LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom).frame(height: 18)
+            })
             .modifier(NotchIslandView.StaggerReveal(index: 2, active: reveal))
 
             // The form is always on, under the dropdown.
             inputRow
                 .modifier(NotchIslandView.StaggerReveal(index: 3, active: reveal))
                 .padding(.top, 8)
-
-            Spacer(minLength: 6)
-            bottomBar
-                .modifier(NotchIslandView.StaggerReveal(index: 4, active: reveal))
         }
         .padding(.horizontal, 4)
         .padding(.top, 4)
@@ -141,63 +153,97 @@ struct AskPane: View {
 
     // MARK: Header
 
+    /// One line: what answers are based on, and the Suggestions dropdown.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            // No title here: the Ask tab in the navigation already says
-            // what this pane is. Just the basis line (and the coverage
-            // note, once a question has been asked).
-            Text("Answers come from the transcript, or the app.")
+        HStack(spacing: 8) {
+            Text("Answers come from the transcript.")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.white.opacity(0.45))
-            if let note = viewModel.coverageNote {
-                Text(note)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.white.opacity(0.45))
-            }
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            suggestionsDropdown
+                .overlay(alignment: .topTrailing) {
+                    if showSuggestions { suggestionList.frame(width: 260).offset(y: 32) }
+                }
         }
+        .padding(.top, 2)
         .padding(.horizontal, 8)
     }
 
     // MARK: Suggestions dropdown
 
-    /// The "What should I ask?" trigger: a row with a chevron; the
-    /// suggestions pop out as a native menu. Text only, no star — the blue
-    /// star lives exactly once, on the Ask tab in the main navigation.
+    /// The "What should I ask?" trigger: a row with a chevron that drops the
+    /// island's own suggestion list over the answer (no native menu chrome).
     private var suggestionsDropdown: some View {
-        Menu {
-            if viewModel.suggestions.isEmpty {
-                Button("No suggestions right now") {}
-                    .disabled(true)
-            } else {
-                ForEach(viewModel.suggestions, id: \.self) { suggestion in
-                    Button(suggestion) {
-                        Task { await viewModel.ask(suggestion) }
-                    }
-                }
-            }
+        Button {
+            withAnimation(IslandMotion.contentIn) { showSuggestions.toggle() }
         } label: {
             HStack(spacing: 6) {
-                Text("What should I ask?")
+                Text("Suggestions")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Color.white)
-                Spacer(minLength: 0)
                 if viewModel.isLoadingSuggestions {
                     ProgressView()
-                        .controlSize(.small)
+                        .controlSize(.mini)
                 } else {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.45))
+                        .foregroundStyle(Color.white.opacity(0.55))
+                        .rotationEffect(.degrees(showSuggestions ? 180 : 0))
                 }
             }
             .padding(.horizontal, 10)
             .frame(height: 28)
-            .background(Color.white.opacity(0.08))
+            .background(Color.white.opacity(showSuggestions ? 0.12 : 0.08))
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .contentShape(RoundedRectangle(cornerRadius: 8))
         }
-        .menuStyle(.borderlessButton)
+        .buttonStyle(.plain)
         .disabled(viewModel.isLoadingSuggestions)
+        .accessibilityLabel("Suggestions")
+        .accessibilityHint(showSuggestions ? "Hides suggested questions" : "Shows suggested questions")
+    }
+
+    /// Suggested questions, one per row; picking one asks it and closes the list.
+    private var suggestionList: some View {
+        // Six generic questions are taller than the room under the trigger: scroll.
+        ScrollView(showsIndicators: false) {
+        VStack(alignment: .leading, spacing: 2) {
+            if viewModel.suggestions.isEmpty {
+                Text("No suggestions right now")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.white.opacity(0.45))
+                    .padding(.horizontal, 8)
+                    .frame(height: 28)
+            } else {
+                ForEach(viewModel.suggestions, id: \.self) { suggestion in
+                    Button {
+                        withAnimation(IslandMotion.contentOut) { showSuggestions = false }
+                        Task { await viewModel.ask(suggestion) }
+                    } label: {
+                        Text(suggestion)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(hoveredSuggestion == suggestion ? 0.1 : 0),
+                                        in: RoundedRectangle(cornerRadius: 6))
+                            .contentShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hoveredSuggestion = $0 ? suggestion : nil }
+                }
+            }
+        }
+        .padding(4)
+        }
+        .frame(maxHeight: 132)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 10))
+        .shadow(color: .black.opacity(0.5), radius: 12, y: 6)
+        .transition(.opacity.combined(with: .offset(y: -4)))
     }
 
     // MARK: Asking / answer
@@ -213,28 +259,64 @@ struct AskPane: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private static let bottomID = "ask-bottom"
+
+    private func scrollToEnd(_ proxy: ScrollViewProxy) {
+        withAnimation(IslandMotion.tabSwap) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+    }
+
+    /// Your question on the right, the reply on the left.
+    private func turnView(_ turn: AskTurn) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Spacer(minLength: 40)
+                Text(turn.question)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.white)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color(red: 0.04, green: 0.47, blue: 1.0), in: BubbleShape(mine: true))
+            }
+            HStack {
+                Group {
+                    if let answer = turn.answer {
+                        answerView(answer)
+                    } else if let error = turn.error {
+                        Text(error)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.red.opacity(0.85))
+                    } else {
+                        askingRow
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.white.opacity(0.07), in: BubbleShape(mine: false))
+                Spacer(minLength: 24)
+            }
+        }
+        .transition(.opacity.combined(with: .offset(y: 6)))
+    }
+
     private func answerView(_ answer: AskAnswer) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let question = viewModel.currentQuestion {
-                Text(question)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.white)
-            }
             Text(answer.answer)
                 .font(.system(size: 12))
-                .foregroundStyle(Color.white.opacity(0.85))
+                .foregroundStyle(Color.white.opacity(0.88))
                 .lineSpacing(2)
+                .textSelection(.enabled)
             if !answer.sources.isEmpty {
                 Text("SOURCES (\(answer.sources.count))")
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(0.6)
                     .foregroundStyle(Color.white.opacity(0.45))
-                    .padding(.top, 4)
+                    .padding(.top, 2)
                 ForEach(answer.sources) { source in
                     HStack(alignment: .top, spacing: 8) {
                         if source.time >= 0 {
                             Text(source.timeLabel)
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
                                 .foregroundStyle(Color.white.opacity(0.9))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 3)
@@ -285,5 +367,18 @@ struct AskPane: View {
         .overlay(RoundedRectangle(cornerRadius: 10)
             .stroke(Color.white.opacity(inputFocused ? 0.35 : 0.12), lineWidth: 1))
         .padding(.horizontal, 8)
+    }
+}
+
+/// Chat bubble: rounded, with the corner nearest the speaker tightened.
+private struct BubbleShape: Shape {
+    var mine: Bool
+    func path(in rect: CGRect) -> Path {
+        let r: CGFloat = 12, tight: CGFloat = 4
+        return Path(roundedRect: rect, cornerRadii: RectangleCornerRadii(
+            topLeading: r,
+            bottomLeading: mine ? r : tight,
+            bottomTrailing: mine ? tight : r,
+            topTrailing: r))
     }
 }

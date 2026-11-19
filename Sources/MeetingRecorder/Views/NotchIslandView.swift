@@ -29,14 +29,15 @@ struct IslandMetrics: Equatable {
     static let nudgeHeight: CGFloat = 26
     /// Expanded card width. Widened to 330 (item 27) so the "Send notes" section
     /// has room. Still clears "Window"/"Help" menus on a 14" display. Tune here.
-    static let baseExpandedWidth: CGFloat = 330
+    static let baseExpandedWidth: CGFloat = 352
     /// Collapsed = icon-only. Each wing holds one 24pt control (record left,
     /// chevron right) → 80pt total without a notch. On a notched screen the
     /// wings sit either side of the camera housing (nothing can draw under it).
     static let idleWing: CGFloat = 40
     /// While recording the wings widen just enough for the live timer.
     /// Fits the timer box: inset 4 + 7 + dot 6 + 5 + "00:00" ≈36 + 7 ≈ 65.
-    static let recordingWing: CGFloat = 66
+    /// Left wing also carries "Stop" beside the waveform: 4 + 35 + "Stop" ≈25 + 7 ≈ 71.
+    static let recordingWing: CGFloat = 72
     static let collapsedBottomRadius: CGFloat = 12
     /// Expanded: square top corners (flush with the screen edge, like the
     /// notch), rounded bottom.
@@ -55,8 +56,16 @@ struct IslandMetrics: Equatable {
     var controlCornerRadius: CGFloat { max(4, Self.collapsedBottomRadius - controlEdgeInset) }
 
     var hasNotch: Bool { notchWidth > 0 }
+    /// Points trimmed from each side of the reported notch width.
+    static let notchMargin: CGFloat = 3
+    /// Beside a camera notch the idle wing hugs its control: edge inset, the
+    /// 24pt box, then just 2pt to the notch. Without a notch the two controls
+    /// share one pill, so keep the roomier 40pt wing.
+    var idleWing: CGFloat { hasNotch ? controlEdgeInset + Self.controlSize + 2 : Self.idleWing }
     func collapsedWidth(recording: Bool) -> CGFloat {
-        notchWidth + 2 * (recording ? Self.recordingWing : Self.idleWing)
+        // macOS reports the notch with a few points of margin each side; the
+        // camera housing itself is narrower, so tuck the wings in over that margin.
+        max(0, notchWidth - 2 * Self.notchMargin) + 2 * (recording ? Self.recordingWing : idleWing)
     }
     /// Never narrower than the widest pill, so on a notch the card only grows downward.
     var expandedWidth: CGFloat { max(Self.baseExpandedWidth, collapsedWidth(recording: true)) }
@@ -167,6 +176,9 @@ enum IslandMotion {
     static let contentIn = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.15)
     /// Exits are shorter than entrances: the user already decided to leave.
     static let contentOut = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.10)
+    /// Tab swap (pill + page together): critically damped spring — no
+    /// overshoot, interruptible mid-switch, settles smoothly.
+    static let tabSwap = Animation.spring(duration: 0.3, bounce: 0)
     /// Body waits for the card to be ~⅓ open so text never spills past the edge.
     static let contentInDelay: Double = 0.05
     static let press = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.10)
@@ -237,9 +249,8 @@ final class IslandModel: ObservableObject {
     @Published var page: Page = .main
     /// Non-nil while the "Saved" result card is showing.
     @Published private(set) var flash: OutputReport?
-    /// The Ask pane is open (via the Ask tab).
-    /// While set, the card never auto-collapses — the user is reading answers.
-    @Published var askOpen = false
+    /// The Ask tab is showing. Ask is the default tab: every open starts here.
+    @Published var askOpen = true
 
     var onHide: () -> Void = {}
     /// Opens the Settings window, optionally scrolled to a section.
@@ -302,7 +313,9 @@ final class IslandModel: ObservableObject {
         flashTask?.cancel()
         flashHolding = false
         flash = nil
-        askOpen = false
+        // Next open starts on Ask again.
+        askOpen = true
+        page = .main
         isExpanded = false
     }
 
@@ -358,7 +371,7 @@ final class IslandModel: ObservableObject {
         hoverTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self else { return }
-            guard !self.isHovering, self.holdCount == 0, !self.flashHolding, !self.askOpen else { return }
+            guard !self.isHovering, self.holdCount == 0, !self.flashHolding else { return }
             self.collapseNow()
         }
     }
@@ -382,6 +395,8 @@ struct NotchIslandView: View {
     @State private var recordHovering = false
     @State private var chevronHovering = false
     @State private var clockHovering = false
+    /// +1 when moving right (to Ask), -1 when moving left (to Notes).
+    @State private var tabDirection: CGFloat = 1
     /// Ask Q&A state lives here (not in the pane) so an answer survives the
     /// card collapsing or the user switching to another page and back.
     @StateObject private var askViewModel = AskViewModel()
@@ -439,9 +454,6 @@ struct NotchIslandView: View {
             .onChange(of: model.isExpanded) { _, open in
                 restartReveal(open: open)
             }
-            .onChange(of: model.page) { _, _ in
-                restartReveal(open: model.isExpanded)
-            }
             // 10-minute nudge: at 10:00 of recording, expand for 2 seconds
             // with "Have anything to clarify? I can help", then hide again.
             .onChange(of: manager.isRecording) { _, recording in
@@ -455,7 +467,7 @@ struct NotchIslandView: View {
             // Ask needs typing: the panel can become key (see canBecomeKey —
             // same precedent as the Groq key field), so make it key when Ask
             // opens and the input can take focus straight away.
-            .onChange(of: model.askOpen) { _, open in
+            .onChange(of: model.askOpen && model.isExpanded) { _, open in
                 if open {
                     NSApp.windows.compactMap({ $0 as? NotchIslandPanel }).first?.makeKey()
                 }
@@ -496,13 +508,13 @@ struct NotchIslandView: View {
                         if isTabbedPane(content) {
                             tabStrip(content: content)
                         }
-                        page(content)
-                            .id(content)
-                            // Tab switches are instant: the fade below is
-                            // for pipeline changes (processing → review →
-                            // success/failure), not for Notes ↔ Ask. A fade
-                            // on every tab switch reads as lag.
-                            .transition(isTabbedPane(content) ? .identity : contentTransition)
+                        // ZStack so the outgoing and incoming tab overlap
+                        // instead of stacking during the swap.
+                        ZStack(alignment: .top) {
+                            page(content)
+                                .id(content)
+                                .transition(isTabbedPane(content) ? tabTransition : contentTransition)
+                        }
                     }
                 }
             }
@@ -550,6 +562,25 @@ struct NotchIslandView: View {
         )
     }
 
+    /// Notes ↔ Ask (Emil Kowalski's rules): short strong ease-out, a few
+    /// points of travel toward the tab you picked, a touch of blur to hide
+    /// the crossfade. Reduce Motion: opacity only.
+    private var tabTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        let travel: CGFloat = 10 * tabDirection
+        return .asymmetric(
+            insertion: .opacity.combined(with: .offset(x: travel))
+                .combined(with: .modifier(active: TabBlur(radius: 2), identity: TabBlur(radius: 0))),
+            removal: .opacity.combined(with: .offset(x: -travel))
+                .combined(with: .modifier(active: TabBlur(radius: 2), identity: TabBlur(radius: 0)))
+        )
+    }
+
+    private struct TabBlur: ViewModifier {
+        var radius: CGFloat
+        func body(content: Content) -> some View { content.blur(radius: radius) }
+    }
+
     private func restartReveal(open: Bool) {
         reveal = false
         guard open else { return }
@@ -582,14 +613,12 @@ struct NotchIslandView: View {
 
     private func bodyHeight(_ content: Pane) -> CGFloat {
         switch content {
-        case .outputs, .ask:
+        case .outputs, .ask, .history:
             // The card grows by the strip (and the nudge while it shows);
             // the pages keep their height. panelSize covers the tallest.
             var height = IslandMetrics.maxBodyHeight + IslandMetrics.tabStripHeight
             if showNudge { height += IslandMetrics.nudgeHeight }
             return height
-        case .history:
-            return IslandMetrics.maxBodyHeight
         case .processing: return 40
         // 4 top + 24 headline + 16 title + 16 details + 10 + 26 buttons + 12 bottom.
         case .review: return 108
@@ -617,9 +646,11 @@ struct NotchIslandView: View {
     private func topRow(open: Bool, content: Pane, recording: Bool) -> some View {
         HStack(spacing: 0) {
             recordControl(open: open)
+                // Background only: a scaled box poked past the island's edge.
                 .modifier(ElementHoverScale(isHovering: $recordHovering,
                                             enabled: !manager.isProcessing && groqKeyValid,
-                                            cornerRadius: metrics.controlCornerRadius))
+                                            cornerRadius: metrics.controlCornerRadius,
+                                            scales: false))
             Spacer(minLength: 0)
             ZStack(alignment: .trailing) {
                 if recording && !open {
@@ -729,7 +760,7 @@ struct NotchIslandView: View {
     /// controls stay reachable while asking.
     private var askPage: some View {
         AskPane(viewModel: askViewModel, manager: manager, reveal: reveal,
-                width: metrics.expandedWidth, bottomBar: AnyView(bottomBar))
+                width: metrics.expandedWidth)
     }
 
     // MARK: Tab strip (Notes / Ask) — segmented control
@@ -738,20 +769,24 @@ struct NotchIslandView: View {
     /// freely switch between. History lives in the bottom bar (and its own
     /// Back button), not in the strip. Transient panes pin the card.
     private func isTabbedPane(_ pane: Pane) -> Bool {
-        pane == .outputs || pane == .ask
+        pane == .ask || pane == .outputs || pane == .history
     }
+
+    /// Tab order left → right; also gives the slide direction.
+    private static let tabs: [Pane] = [.ask, .outputs, .history]
 
     /// Notes / Ask segmented control above the page. Selecting a tab closes
     /// Ask when leaving it.
     private func tabStrip(content: Pane) -> some View {
         IslandSegmentedControl(
             segments: [
+                .init(title: "Ask", icon: "sparkle"),
                 .init(title: "Notes", icon: "doc.text"),
-                .init(title: "Ask", icon: "sparkle", iconIsAccent: true),
+                .init(title: "History", icon: "clock.arrow.circlepath"),
             ],
-            selected: content == .ask ? 1 : 0
+            selected: Self.tabs.firstIndex(of: content) ?? 0
         ) { index in
-            showTab(index == 0 ? .outputs : .ask)
+            showTab(Self.tabs[index], from: content)
         }
         .padding(.horizontal, 12)
         .padding(.top, 4)
@@ -760,15 +795,26 @@ struct NotchIslandView: View {
 
     /// Switches the main pane. Ask opens via openAsk; leaving Ask closes
     /// it so the underlying page actually shows.
-    private func showTab(_ tab: Pane) {
-        switch tab {
-        case .ask:
-            model.openAsk()
-        case .outputs:
-            model.closeAsk()
-            model.page = .main
-        default:
-            break
+    private func showTab(_ tab: Pane, from current: Pane) {
+        guard tab != current else { return }
+        tabDirection = (Self.tabs.firstIndex(of: tab) ?? 0) > (Self.tabs.firstIndex(of: current) ?? 0) ? 1 : -1
+        // Next runloop: the leaving tab must re-render with the new direction
+        // first, or it slides out the way the previous switch went.
+        DispatchQueue.main.async {
+            withAnimation(IslandMotion.tabSwap) {
+                switch tab {
+                case .ask:
+                    model.openAsk()
+                case .outputs:
+                    model.closeAsk()
+                    model.page = .main
+                case .history:
+                    model.closeAsk()
+                    model.page = .history
+                default:
+                    break
+                }
+            }
         }
     }
 
@@ -790,7 +836,7 @@ struct NotchIslandView: View {
         nudgeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, manager.isRecording,
-                  !model.askOpen, isTabbedPane(currentPane) else { return }
+                  !(model.isExpanded && model.askOpen), isTabbedPane(currentPane) else { return }
             let wasExpanded = model.isExpanded
             if !wasExpanded { model.expand() }
             withAnimation(IslandMotion.contentIn) { showNudge = true }
@@ -861,10 +907,6 @@ struct NotchIslandView: View {
                 }
             }
             .padding(.top, 4)
-
-            Spacer(minLength: 6)
-            bottomBar
-                .modifier(StaggerReveal(index: 5, active: reveal))
         }
         // item 27: 4 outer + 8 row inset = 12pt text inset, matching the top row.
         .padding(.horizontal, 4)
@@ -904,100 +946,10 @@ struct NotchIslandView: View {
         }
     }
 
-    private var bottomBar: some View {
-        HStack(spacing: 4) {
-            if manager.isRecording, let start = manager.recordingStartedAt {
-                Button {
-                    Task { await manager.stopRecording() }
-                } label: {
-                    HStack(spacing: 8) {
-                        RecordFace(kind: .stop, pulses: true, diameter: 18)
-                        Text("Stop")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Color.white)
-                        RecordingClock(start: start)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color.white.opacity(0.6))
-                    }
-                    .padding(.horizontal, 8)
-                    .frame(height: 30)
-                    .background(Capsule().fill(Color.red.opacity(0.22)))
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(PressScaleStyle())
-                .accessibilityLabel("Stop recording")
-                // Items 43 + 44: the red capsule is the visible edge here, and it
-                // sat at the 4pt outer inset — 12pt from the bottom but only 4pt
-                // from the side, crowding the 20pt corner. +8 → 12pt side ==
-                // 12pt bottom, and the Stop shifts right onto the card's 12pt
-                // rhythm (top-row controls, row text). Padding sits outside the
-                // Button so the press-scale anchor/hit area are unchanged.
-                .padding(.leading, 8)
-
-                // item 20 island: mic level meter, hidden when not recording
-                MicLevelBar(level: manager.audioRecorder.micLevel)
-                    .transition(.opacity.animation(IslandMotion.contentIn))
-
-                Spacer(minLength: 0)
-                if !manager.meetingHistory.isEmpty {
-                    IslandIconButton(systemName: "clock.arrow.circlepath", help: "History (\(manager.meetingHistory.count))") {
-                        // Leaving Ask closes it, or the page switch below
-                        // would be swallowed (Ask outranks the page).
-                        model.closeAsk()
-                        model.page = .history
-                    }
-                }
-            } else {
-                if !manager.meetingHistory.isEmpty {
-                    Button {
-                        // Leaving Ask closes it, or the page switch below
-                        // would be swallowed (Ask outranks the page).
-                        model.closeAsk()
-                        model.page = .history
-                    } label: {
-                        Label("History (\(manager.meetingHistory.count))", systemImage: "clock.arrow.circlepath")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color.white.opacity(0.7))
-                            .padding(.horizontal, 8)
-                            .frame(height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(PressScaleStyle())
-                }
-                Spacer(minLength: 0)
-            }
-
-            IslandIconButton(systemName: "gearshape", help: "Settings") {
-                model.onOpenSettings(nil)
-            }
-            IslandIconButton(systemName: "xmark.circle", help: "Hide island — keeps running; reopen from the menu bar") {
-                model.onHide()
-            }
-        }
-        .frame(height: 30)
-    }
-
     private var historyPage: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Button { model.page = .main } label: {
-                    Label("Back", systemImage: "chevron.left")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.7))
-                        .frame(height: 24)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PressScaleStyle())
-                Spacer()
-                Text("History")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.45))
-            }
-            .padding(.horizontal, 8)
-            .modifier(StaggerReveal(index: 0, active: reveal))
-
             HistoryView()
-                .modifier(StaggerReveal(index: 1, active: reveal))
+                .modifier(StaggerReveal(index: 0, active: reveal))
         }
         .padding(.horizontal, 4)
         .padding(.top, 2)
@@ -1325,7 +1277,7 @@ struct IslandSegmentedControl: View {
         .padding(3)
         .background(Color.white.opacity(0.06))
         .clipShape(Capsule())
-        .animation(.easeOut(duration: 0.2), value: selected)
+        .animation(IslandMotion.tabSwap, value: selected)
     }
 }
 
@@ -1353,6 +1305,7 @@ struct RecordControlButton: View {
 
     var body: some View {
         Button(action: action) {
+          HStack(spacing: 0) {
             // All four glyphs stay mounted and cross-morph (scale + blur + fade) on one
             // spring, so mic → waveform → stop is one continuous, interruptible motion.
             ZStack {
@@ -1373,8 +1326,20 @@ struct RecordControlButton: View {
             }
             // Glyph centred in its box; the box (= hover highlight) is square for mic/stop
             // and widens for the 21pt waveform, keeping the same 7pt inset each side.
-            .frame(width: glyph == .wave ? 21 + 2 * IslandMetrics.controlContentInset : IslandMetrics.controlSize,
+            // Recording keeps the waveform-wide box even on hover (stop square),
+            // so "Stop" beside it never shifts.
+            .frame(width: isRecording && !isProcessing ? 21 + 2 * IslandMetrics.controlContentInset : IslandMetrics.controlSize,
                    height: IslandMetrics.controlSize)
+            if isRecording && !isProcessing {
+                Text("Stop")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.9))
+                    .fixedSize()
+                    .padding(.leading, -3)
+                    .padding(.trailing, IslandMetrics.controlContentInset)
+                    .transition(.opacity)
+            }
+          }
             .animation(reduceMotion ? IslandMotion.reducedFade : .spring(duration: 0.3, bounce: 0.2), value: glyph)
             .contentShape(Rectangle())
         }
@@ -1516,42 +1481,6 @@ struct BlinkingDot: View {
                 blinkPhase = true
             }
             .accessibilityHidden(true)
-    }
-}
-
-// MARK: - Mic level meter (item 20 — island side)
-
-/// A compact 5-bar level meter rendered next to the Stop button in the bottom
-/// bar while recording. Transform/opacity only (Emil-style). The caller
-/// conditionally shows this view with a .transition(.opacity) for clean in/out.
-struct MicLevelBar: View {
-    /// 0…1, published by AudioRecorder at ~10 Hz.
-    /// ORCHESTRATOR-GLUE: manager.audioRecorder.micLevel: Float
-    var level: Float
-
-    private let barCount = 5
-    private let barWidth: CGFloat = 3
-    private let barSpacing: CGFloat = 2
-    private let maxHeight: CGFloat = 14
-    private let minHeight: CGFloat = 3
-
-    var body: some View {
-        HStack(alignment: .center, spacing: barSpacing) {
-            ForEach(0..<barCount, id: \.self) { i in
-                let threshold = Float(i) / Float(barCount)
-                let lit = level > threshold
-                let heightFraction = CGFloat(i + 1) / CGFloat(barCount)
-                let barH = minHeight + (maxHeight - minHeight) * heightFraction
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(lit ? Color.green : Color.white.opacity(0.15))
-                    .frame(width: barWidth, height: barH)
-                    // Transform only: scale vertically from center
-                    .scaleEffect(y: lit ? 1.0 : 0.6, anchor: .bottom)
-                    .animation(IslandMotion.contentIn, value: lit)
-            }
-        }
-        .frame(height: maxHeight)
-        .accessibilityHidden(true)
     }
 }
 
