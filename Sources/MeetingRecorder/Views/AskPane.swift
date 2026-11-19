@@ -40,12 +40,21 @@ final class AskViewModel: ObservableObject {
         isLoadingSuggestions = false
     }
 
-    /// A meeting just ended: the conversation belonged to it, so the next
-    /// meeting starts with a fresh chat. Called when recording stops.
-    func clearTurns() {
+    /// A new meeting starts with a fresh chat and the generic suggestions.
+    /// Called when recording starts — not on stop, since the finished meeting
+    /// is still askable while it's reviewed.
+    func reset() {
         turns = []
+        suggestions = []
         errorMessage = nil
         coverageNote = nil
+    }
+
+    /// The first transcript just landed: swap the generic suggestions for
+    /// ones drawn from what was actually said.
+    func refreshSuggestions() async {
+        suggestions = []
+        await loadSuggestions()
     }
 
     /// Asks one question and appends it to the conversation; earlier
@@ -56,13 +65,16 @@ final class AskViewModel: ObservableObject {
         isAsking = true
         errorMessage = nil
         input = ""
-        withAnimation(IslandMotion.tabSwap) { turns.append(AskTurn(question: trimmed)) }
-        let index = turns.count - 1
+        let turn = AskTurn(question: trimmed)
+        withAnimation(IslandMotion.tabSwap) { turns.append(turn) }
+        // Look the turn up by id when the reply lands: the chat may have been
+        // reset meanwhile (a new recording), and a stale index would crash.
         do {
-            turns[index].answer = try await manager.ask(question: trimmed)
+            let answer = try await manager.ask(question: trimmed)
+            if let i = turns.firstIndex(where: { $0.id == turn.id }) { turns[i].answer = answer }
             coverageNote = manager.askCoverageNote
         } catch {
-            turns[index].error = error.localizedDescription
+            if let i = turns.firstIndex(where: { $0.id == turn.id }) { turns[i].error = error.localizedDescription }
         }
         isAsking = false
     }
@@ -185,6 +197,7 @@ struct AskPane: View {
     private var suggestionsDropdown: some View {
         Button {
             withAnimation(IslandMotion.contentIn) { showSuggestions.toggle() }
+            if viewModel.suggestions.isEmpty { Task { await viewModel.loadSuggestions() } }
         } label: {
             HStack(spacing: 6) {
                 Text("Suggestions")

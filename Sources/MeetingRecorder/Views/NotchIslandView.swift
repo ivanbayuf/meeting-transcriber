@@ -458,14 +458,17 @@ struct NotchIslandView: View {
             // with "Have anything to clarify? I can help", then hide again.
             .onChange(of: manager.isRecording) { _, recording in
                 if recording {
+                    // New meeting: fresh chat and generic suggestions until
+                    // the first chunk is transcribed.
+                    askViewModel.reset()
                     scheduleNudge()
                 } else {
                     nudgeTask?.cancel()
                     showNudge = false
-                    // The meeting ended: its chat goes with it, so the next
-                    // meeting starts with a fresh conversation.
-                    askViewModel.clearTurns()
                 }
+            }
+            .onChange(of: manager.hasLiveTranscript) { _, hasTranscript in
+                if hasTranscript { Task { await askViewModel.refreshSuggestions() } }
             }
             // Ask needs typing: the panel can become key (see canBecomeKey —
             // same precedent as the Groq key field), so make it key when Ask
@@ -1461,8 +1464,6 @@ struct PulseEffect: ViewModifier {
             .task(id: running) { phase = running }
     }
 }
-
-// MARK: - Blinking dot (item 24)
 
 /// mm:ss (h:mm:ss past an hour), ticking once a second. Digits are monospaced
 /// and the change is not animated — it's live data, not decoration.
