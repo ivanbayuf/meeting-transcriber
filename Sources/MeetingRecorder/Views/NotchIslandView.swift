@@ -394,7 +394,6 @@ struct NotchIslandView: View {
     // Hover state drives target scale and the recording waveform/stop swap.
     @State private var recordHovering = false
     @State private var chevronHovering = false
-    @State private var clockHovering = false
     /// +1 when moving right (to Ask), -1 when moving left (to Notes).
     @State private var tabDirection: CGFloat = 1
     /// Ask Q&A state lives here (not in the pane) so an answer survives the
@@ -536,7 +535,7 @@ struct NotchIslandView: View {
         .overlay(alignment: .topTrailing) { ear.scaleEffect(x: -1).offset(x: IslandMetrics.earRadius) }
         .shadow(color: .black.opacity(open ? 0.45 : 0), radius: 18, x: 0, y: 10)
         // item 34: pill-wide overlay REMOVED — per-element hover fills are on
-        // RecordControlButton, chevron, and collapsedClock individually.
+        // RecordControlButton and the chevron (with the timer) individually.
         .contentShape(shape)
         // item 21 / 34: onContinuousHover feeds collapse-grace only; no expand, no pill fill.
         .onContinuousHover { phase in
@@ -658,24 +657,16 @@ struct NotchIslandView: View {
                                             cornerRadius: metrics.controlCornerRadius,
                                             scales: false))
             Spacer(minLength: 0)
-            // The chevron stays while recording: collapsed + recording shows
-            // the timer with the chevron right beside it (no red dot). The
-            // chevron is permanent; only the timer fades in and out.
-            HStack(spacing: 0) {
-                if recording && !open {
-                    collapsedClock
-                        .modifier(ElementHoverScale(isHovering: $clockHovering,
-                                                    cornerRadius: metrics.controlCornerRadius,
-                                                    scales: false))
-                        .transition(.opacity)
-                }
-                chevron(open: open, content: content)
-                    .modifier(ElementHoverScale(
-                        isHovering: $chevronHovering,
-                        enabled: !(content == .processing || content == .review || content == .failure),
-                        cornerRadius: metrics.controlCornerRadius
-                    ))
-            }
+            // Collapsed + recording: timer and chevron are one button (one
+            // highlight); otherwise the chevron alone.
+            let showClock = recording && !open
+            chevron(open: open, content: content, showClock: showClock)
+                .modifier(ElementHoverScale(
+                    isHovering: $chevronHovering,
+                    enabled: !(content == .processing || content == .review || content == .failure),
+                    cornerRadius: metrics.controlCornerRadius,
+                    scales: !showClock
+                ))
         }
         // Same inset open or collapsed: glyphs land ~11pt in, on the body's 12pt text edge.
         .padding(.horizontal, metrics.controlEdgeInset)
@@ -705,37 +696,28 @@ struct NotchIslandView: View {
         return false
     }
 
-    /// Live timer in the collapsed right wing (items 22, 24). Clicking the
-    /// timer opens the card. No red dot — the timer alone, with the chevron
-    /// beside it (see topRow).
-    @ViewBuilder
-    private var collapsedClock: some View {
-        if let start = manager.recordingStartedAt {
-            // Time is ONE box (one button, one highlight), same 7pt inset as the glyphs.
-            Button { model.toggleExpanded() } label: {
-                RecordingClock(start: start)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.9))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                    .padding(.horizontal, IslandMetrics.controlContentInset)
-                    .frame(height: IslandMetrics.controlSize)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Expand")
-            .accessibilityLabel("Recording time")
-        }
-    }
-
-    private func chevron(open: Bool, content: Pane) -> some View {
+    private func chevron(open: Bool, content: Pane, showClock: Bool = false) -> some View {
         Button { model.toggleExpanded() } label: {
-            Image(systemName: "chevron.down")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.55))
-                .rotationEffect(.degrees(open ? 180 : 0))
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
+            HStack(spacing: 4) {
+                if showClock, let start = manager.recordingStartedAt {
+                    RecordingClock(start: start)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.leading, IslandMetrics.controlContentInset)
+                        .transition(.opacity)
+                }
+                // Beside the timer the glyph drops its 24pt box, so the visible
+                // gap is the 4pt spacing; it keeps the box's 7pt right inset.
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.55))
+                    .rotationEffect(.degrees(open ? 180 : 0))
+                    .frame(width: showClock ? nil : 24, height: 24)
+                    .padding(.trailing, showClock ? IslandMetrics.controlContentInset : 0)
+            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(PressScaleStyle())
         // Can't fold away a running pipeline or an unacknowledged blocker.
