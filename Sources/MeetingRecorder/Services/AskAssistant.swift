@@ -11,6 +11,8 @@ enum AskError: LocalizedError {
     case noTranscript
     /// The model replied, but not in the expected JSON shape.
     case badAnswer
+    /// Groq's free per-minute budget is busy (shared with the live summaries).
+    case rateLimited
 
     var errorDescription: String? {
         switch self {
@@ -18,6 +20,8 @@ enum AskError: LocalizedError {
             return "Nothing to ask about yet — start recording or wait for the transcript."
         case .badAnswer:
             return "The answer came back in an unexpected format. Try asking again."
+        case .rateLimited:
+            return "Groq is busy right now — its free limit is shared with the live summaries. Try again in a moment."
         }
     }
 }
@@ -61,20 +65,33 @@ extension GroqClient {
     /// Answers one question from the transcript. `segments` carry Whisper
     /// timestamps; when they are absent the transcript is passed as plain text
     /// and sources come back with `time = -1` (quote only, no time chip).
+    /// `summary` is the whole-meeting summary, sent only when the meeting is
+    /// too long for one call. Ask fails fast on a rate limit (no long
+    /// retry-after sleeps) — see `GroqClient.chat`.
     func ask(question: String, transcript: String, segments: [TranscriptionSegment]?,
-             meetingDate: Date) async throws -> AskAnswer {
-        let sourced = Self.sourcedTranscript(transcript: transcript, segments: segments)
-        let json = try await chat(
-            """
-            Meeting date: \(Self.isoDate(meetingDate))
-            Transcript (each line starts with its [MM:SS] time; lines without a time have none):
-            \(sourced)
+             meetingDate: Date, summary: String? = nil) async throws -> AskAnswer {
+        let (sourced, truncated) = Self.sourcedTranscript(question: question, transcript: transcript,
+                                                           segments: segments, summary: summary)
+        let note = truncated
+            ? "Note: this meeting is longer than one call can hold. The transcript below is the part most relevant to the question (with a summary of the whole meeting above it, when shown). If the answer isn't in these excerpts or the summary, say so."
+            : ""
+        let json: String
+        do {
+            json = try await chat(
+                """
+                Meeting date: \(Self.isoDate(meetingDate))
+                \(note)
+                Transcript (each line starts with its [MM:SS] time; lines without a time have none):
+                \(sourced)
 
-            Question: \(question)
+                Question: \(question)
 
-            Answer the question using ONLY the transcript above. Reply in the transcript's language.
-            """,
-            systemPrompt: Self.askSystemPrompt)
+                Answer the question using ONLY the transcript and summary above. Reply in the transcript's language.
+                """,
+                systemPrompt: Self.askSystemPrompt, failFastOnRateLimit: true)
+        } catch GroqError.rateLimited {
+            throw AskError.rateLimited
+        }
         guard let data = json.data(using: .utf8),
               let decoded = try? JSONDecoder().decode(AskAnswerJSON.self, from: data) else {
             throw AskError.badAnswer
@@ -87,19 +104,29 @@ extension GroqClient {
     /// Three short questions a participant would plausibly ask about this
     /// meeting, drawn from what was actually discussed.
     func suggestedQuestions(transcript: String, segments: [TranscriptionSegment]?,
-                            meetingDate: Date) async throws -> [String] {
-        let sourced = Self.sourcedTranscript(transcript: transcript, segments: segments)
-        let json = try await chat(
-            """
-            Meeting date: \(Self.isoDate(meetingDate))
-            Transcript (each line starts with its [MM:SS] time; lines without a time have none):
-            \(sourced)
+                            meetingDate: Date, summary: String? = nil) async throws -> [String] {
+        let (sourced, truncated) = Self.sourcedTranscript(question: nil, transcript: transcript,
+                                                           segments: segments, summary: summary)
+        let note = truncated
+            ? "Note: this meeting is longer than one call can hold. The transcript below is the most recent part (with a summary of the whole meeting above it, when shown)."
+            : ""
+        let json: String
+        do {
+            json = try await chat(
+                """
+                Meeting date: \(Self.isoDate(meetingDate))
+                \(note)
+                Transcript (each line starts with its [MM:SS] time; lines without a time have none):
+                \(sourced)
 
-            Suggest 3 short questions a participant would plausibly ask about this meeting,
-            based on what was actually discussed. Prefer questions about decisions, commitments,
-            and open items over generic ones.
-            """,
-            systemPrompt: Self.suggestionsSystemPrompt)
+                Suggest 3 short questions a participant would plausibly ask about this meeting,
+                based on what was actually discussed. Prefer questions about decisions, commitments,
+                and open items over generic ones.
+                """,
+                systemPrompt: Self.suggestionsSystemPrompt, failFastOnRateLimit: true)
+        } catch GroqError.rateLimited {
+            throw AskError.rateLimited
+        }
         guard let data = json.data(using: .utf8),
               let decoded = try? JSONDecoder().decode(AskSuggestionsJSON.self, from: data) else {
             throw AskError.badAnswer
@@ -107,24 +134,107 @@ extension GroqClient {
         return Array(decoded.questions.prefix(3))
     }
 
+    /// Max verbatim transcript characters in one Ask call — the free Groq
+    /// per-minute token budget caps the context.
+    static let maxAskChars = 24_000
+    /// Cap for the whole-meeting summary block sent with a truncated transcript.
+    private static let maxSummaryChars = 3_000
+
+    /// One verbatim unit the model can cite: a Whisper segment (with its
+    /// start time) or one sentence of a plain transcript (time -1).
+    private struct SourcedUnit {
+        let time: TimeInterval
+        let line: String
+    }
+
     /// Transcript lines prefixed with their segment start time, so the model
-    /// can cite moments. Capped — a very long meeting's tail is out of scope
-    /// for v1 (the summary path chunks instead; ask can follow the same
-    /// pattern later). The cap keeps one ask call inside the free Groq
-    /// per-minute token budget.
-    private static func sourcedTranscript(transcript: String,
-                                          segments: [TranscriptionSegment]?) -> String {
-        let maxChars = 24_000
+    /// can cite moments. Returns the text to send and whether it was cut down:
+    /// a meeting longer than `maxAskChars` (~30–40 min of speech) can't fit one
+    /// call, so the verbatim block becomes the part most relevant to the
+    /// question (keyword overlap; most recent part when nothing matches, or
+    /// when suggesting questions) and the whole-meeting summary covers the
+    /// rest. Nothing is silently dropped to the first 24,000 characters.
+    private static func sourcedTranscript(question: String?, transcript: String,
+                                          segments: [TranscriptionSegment]?,
+                                          summary: String?) -> (text: String, truncated: Bool) {
+        let units: [SourcedUnit]
         if let segments, !segments.isEmpty {
-            let lines = segments.map { segment in
+            units = segments.map { segment in
                 let total = Int(segment.start)
                 let label = String(format: "%02d:%02d", total / 60, total % 60)
-                return "[\(label)] \(segment.text)"
+                return SourcedUnit(time: segment.start, line: "[\(label)] \(segment.text)")
             }
-            let joined = lines.joined(separator: "\n")
-            return joined.count > maxChars ? String(joined.prefix(maxChars)) : joined
+        } else {
+            units = plainTextUnits(transcript)
         }
-        return transcript.count > maxChars ? String(transcript.prefix(maxChars)) : transcript
+        let full = units.map(\.line).joined(separator: "\n")
+        guard full.count > maxAskChars else { return (full, false) }
+        var blocks: [String] = []
+        if let summary, !summary.isEmpty {
+            blocks.append("Meeting summary (whole meeting):\n\(summary.prefix(maxSummaryChars))")
+        }
+        blocks.append(selectUnits(units, question: question, maxChars: maxAskChars)
+            .map(\.line).joined(separator: "\n"))
+        return (blocks.joined(separator: "\n\n"), true)
+    }
+
+    /// Picks the verbatim units that fit `maxChars`: highest keyword overlap
+    /// with the question first (ties broken by recency), returned in time
+    /// order. No question, or nothing matches → the most recent units.
+    private static func selectUnits(_ units: [SourcedUnit], question: String?,
+                                    maxChars: Int) -> [SourcedUnit] {
+        let words = questionWords(question)
+        let scored = units.map { unit -> (unit: SourcedUnit, score: Int) in
+            let lower = unit.line.lowercased()
+            return (unit, words.filter { lower.contains($0) }.count)
+        }
+        let ordered = scored.sorted {
+            if $0.score != $1.score { return $0.score > $1.score }
+            return $0.unit.time > $1.unit.time
+        }
+        let pool = ordered.contains { $0.score > 0 } ? ordered.filter { $0.score > 0 } : ordered
+        var chosen: [SourcedUnit] = []
+        var count = 0
+        for entry in pool {
+            let len = entry.unit.line.count + 1
+            if !chosen.isEmpty, count + len > maxChars { break }
+            chosen.append(entry.unit)
+            count += len
+        }
+        return chosen.sorted { $0.time < $1.time }
+    }
+
+    /// Significant words from the question for retrieval: lowercased, ≥3
+    /// letters, minus filler words that appear in nearly every question or
+    /// meeting.
+    private static func questionWords(_ question: String?) -> [String] {
+        guard let question else { return [] }
+        let stopwords: Set<String> = ["what", "when", "where", "who", "whom", "whose", "which", "why", "how",
+            "did", "does", "was", "were", "are", "been", "being", "the", "and", "for", "with", "about",
+            "this", "that", "these", "those", "there", "here", "from", "into", "have", "has", "had",
+            "can", "could", "would", "should", "will", "say", "said", "tell", "ask", "asked", "meeting",
+            "discuss", "discussed", "talk", "talked", "mention", "mentioned", "anything", "something"]
+        let words = question.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 3 && !stopwords.contains($0) }
+        return Array(Set(words))
+    }
+
+    /// Plain transcript (no Whisper segments — older history): sentence-sized
+    /// units so retrieval can still pick the relevant part. Time unknown (-1).
+    private static func plainTextUnits(_ transcript: String) -> [SourcedUnit] {
+        var units: [SourcedUnit] = []
+        var start = transcript.startIndex
+        for index in transcript.indices where ".!?。！？\n".contains(transcript[index]) {
+            let next = transcript.index(after: index)
+            let sentence = transcript[start..<next].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !sentence.isEmpty { units.append(SourcedUnit(time: -1, line: sentence)) }
+            start = next
+        }
+        if start < transcript.endIndex {
+            let tail = transcript[start...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !tail.isEmpty { units.append(SourcedUnit(time: -1, line: tail)) }
+        }
+        return units
     }
 
     private static let askSystemPrompt = """
@@ -137,7 +247,7 @@ extension GroqClient {
 
         Rules:
         - Every claim in the answer must be backed by a source quote. No quote, no claim.
-        - Quotes must be verbatim from the transcript — copy the words exactly, don't paraphrase into a quote.
+        - Quotes must be verbatim from the transcript excerpts or from the meeting summary (when one is shown) — copy the words exactly, don't paraphrase into a quote. Quotes from the summary use time -1.
         - At most 3 sources; pick the moments that most directly answer the question.
         - If the question is about commitments, decisions, or action items, quote the exact wording (who does what, by when) when the transcript states it.
         - Never invent names, dates, or numbers that aren't in the transcript. Never attribute a point to a speaker — the transcript has no speaker labels.

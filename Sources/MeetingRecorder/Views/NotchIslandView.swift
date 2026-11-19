@@ -31,11 +31,15 @@ struct IslandMetrics: Equatable {
     /// wings sit either side of the camera housing (nothing can draw under it).
     /// Ask adds a second 24pt control to the right wing (sparkles beside the
     /// chevron), so the idle wing grows to hold both: 24 + 4 + 24 + insets.
-    static let idleWing: CGFloat = 64
+    /// The wide wings are used ONLY while Ask is shown — before the first
+    /// chunk is transcribed the pill stays at its small size.
+    static let idleWing: CGFloat = 40
+    static let idleWingWithAsk: CGFloat = 64
     /// While recording the wings widen just enough for the live timer.
     /// Fits the timer box: inset 4 + 7 + dot 6 + 5 + "00:00" ≈36 + 7 ≈ 65 —
     /// plus the Ask button beside it: + 4 + 24.
-    static let recordingWing: CGFloat = 100
+    static let recordingWing: CGFloat = 66
+    static let recordingWingWithAsk: CGFloat = 100
     static let collapsedBottomRadius: CGFloat = 12
     /// Expanded: square top corners (flush with the screen edge, like the
     /// notch), rounded bottom.
@@ -54,11 +58,14 @@ struct IslandMetrics: Equatable {
     var controlCornerRadius: CGFloat { max(4, Self.collapsedBottomRadius - controlEdgeInset) }
 
     var hasNotch: Bool { notchWidth > 0 }
-    func collapsedWidth(recording: Bool) -> CGFloat {
-        notchWidth + 2 * (recording ? Self.recordingWing : Self.idleWing)
+    func collapsedWidth(recording: Bool, showAsk: Bool = false) -> CGFloat {
+        let wing = recording
+            ? (showAsk ? Self.recordingWingWithAsk : Self.recordingWing)
+            : (showAsk ? Self.idleWingWithAsk : Self.idleWing)
+        return notchWidth + 2 * wing
     }
     /// Never narrower than the widest pill, so on a notch the card only grows downward.
-    var expandedWidth: CGFloat { max(Self.baseExpandedWidth, collapsedWidth(recording: true)) }
+    var expandedWidth: CGFloat { max(Self.baseExpandedWidth, collapsedWidth(recording: true, showAsk: true)) }
     var panelSize: CGSize {
         CGSize(width: expandedWidth + 2 * Self.shadowInset,
                height: topBarHeight + Self.maxBodyHeight + Self.shadowInset)
@@ -386,6 +393,7 @@ struct NotchIslandView: View {
         var open: Bool
         var pane: Pane
         var recording: Bool
+        var showAsk: Bool
     }
 
     private var metrics: IslandMetrics { model.metrics }
@@ -409,8 +417,9 @@ struct NotchIslandView: View {
         let content = currentPane
         let open = model.isExpanded || isPinned(content)
         let recording = manager.isRecording
+        let showAsk = manager.canAsk
 
-        card(open: open, content: content, recording: recording)
+        card(open: open, content: content, recording: recording, showAsk: showAsk)
             .frame(width: metrics.panelSize.width, height: metrics.panelSize.height, alignment: .top)
             .ignoresSafeArea()
             .environment(\.colorScheme, .dark)
@@ -419,7 +428,7 @@ struct NotchIslandView: View {
         // longer on enter (expand), shorter on exit (collapse). Reduce Motion:
         // the shape snaps (no movement); content still crossfades.
             .animation(reduceMotion ? nil : (open ? IslandMotion.expand : IslandMotion.collapse),
-                       value: LayoutKey(open: open, pane: content, recording: recording))
+                       value: LayoutKey(open: open, pane: content, recording: recording, showAsk: showAsk))
             // onChange, not onReceive: a publisher built inside body is re-subscribed on every
             // render and replays lastReport, so presentSuccess → re-render → replay looped forever.
             .onChange(of: manager.lastReport) { _, report in
@@ -445,17 +454,17 @@ struct NotchIslandView: View {
 
     // MARK: Card
 
-    private func card(open: Bool, content: Pane, recording: Bool) -> some View {
+    private func card(open: Bool, content: Pane, recording: Bool, showAsk: Bool) -> some View {
         // Square top corners in BOTH states: the island hangs from the screen
         // edge like the notch itself. Only the bottom radius changes.
         let shape = IslandShape(
             topRadius: 0,
             bottomRadius: open ? IslandMetrics.expandedBottomRadius : IslandMetrics.collapsedBottomRadius
         )
-        let width = open ? metrics.expandedWidth : metrics.collapsedWidth(recording: recording)
+        let width = open ? metrics.expandedWidth : metrics.collapsedWidth(recording: recording, showAsk: showAsk)
 
         return VStack(spacing: 0) {
-            topRow(open: open, content: content, recording: recording)
+            topRow(open: open, content: content, recording: recording, showAsk: showAsk)
                 .frame(width: width, height: metrics.topBarHeight)
 
             // Body is laid out at full card width from the first frame and revealed
@@ -565,9 +574,14 @@ struct NotchIslandView: View {
     /// live timer while collapsed and recording. On a notched screen the
     /// camera housing sits in the Spacer between the wings.
     ///
+    /// The Ask button is only in the row while there is something to ask
+    /// about (`showAsk`): before the first chunk is transcribed it isn't
+    /// there at all, so the pill stays small instead of widening for a
+    /// button that can't do anything yet.
+    ///
     /// Each interactive target scales on hover; island-level continuous hover
     /// still controls collapse grace.
-    private func topRow(open: Bool, content: Pane, recording: Bool) -> some View {
+    private func topRow(open: Bool, content: Pane, recording: Bool, showAsk: Bool) -> some View {
         HStack(spacing: 0) {
             recordControl(open: open)
                 .modifier(ElementHoverScale(isHovering: $recordHovering,
@@ -575,10 +589,12 @@ struct NotchIslandView: View {
                                             cornerRadius: metrics.controlCornerRadius))
             Spacer(minLength: 0)
             HStack(spacing: 4) {
-                askButton(content: content)
-                    .modifier(ElementHoverScale(isHovering: $askHovering,
-                                                enabled: askEnabled(content: content),
-                                                cornerRadius: metrics.controlCornerRadius))
+                if showAsk {
+                    askButton(content: content)
+                        .modifier(ElementHoverScale(isHovering: $askHovering,
+                                                    enabled: askEnabled(content: content),
+                                                    cornerRadius: metrics.controlCornerRadius))
+                }
                 ZStack(alignment: .trailing) {
                     if recording && !open {
                         // Collapsed + recording: blinking dot + timer (items 22, 24)

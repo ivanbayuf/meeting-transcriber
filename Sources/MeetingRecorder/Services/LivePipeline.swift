@@ -25,12 +25,18 @@ actor LivePipeline {
     private var sawLast = false
     /// Seconds per recorded chunk (AudioRecorder rotates every 600s by default).
     private let segmentDuration: TimeInterval
+    /// Called (once per chunk, on the actor) when a chunk's transcript lands —
+    /// the island uses it to reveal the Ask button as soon as there is
+    /// something to ask about.
+    private let onChunkTranscribed: (() -> Void)?
 
-    init(groq: GroqClient, language: String?, meetingDate: Date, segmentDuration: TimeInterval = 600) {
+    init(groq: GroqClient, language: String?, meetingDate: Date, segmentDuration: TimeInterval = 600,
+         onChunkTranscribed: (() -> Void)? = nil) {
         self.groq = groq
         self.language = language
         self.meetingDate = meetingDate
         self.segmentDuration = segmentDuration
+        self.onChunkTranscribed = onChunkTranscribed
     }
 
     /// Safe to call from the audio queue.
@@ -63,6 +69,9 @@ actor LivePipeline {
                 text = "" // a near-empty final chunk is fine
             }
             transcripts[index] = text
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                onChunkTranscribed?()
+            }
             // Skip summarising near-silent chunks (Whisper turns silence into "Thank you.").
             guard text.trimmingCharacters(in: .whitespacesAndNewlines).count >= 40 else { return }
             for part in GroqClient.transcriptParts(text) {
@@ -77,9 +86,11 @@ actor LivePipeline {
 
     /// Transcript so far (finished chunks in order) with their segments,
     /// for Ask while the meeting is still recording. Empty when nothing has
-    /// been transcribed yet.
+    /// been transcribed yet. A snapshot — it does NOT wait for the chunk now
+    /// recording: waiting would stall Ask behind a transcription (and its
+    /// 429 retries) that can take a minute. The chunk in flight simply isn't
+    /// in the answer yet; the pane says so.
     func partialTranscript() async -> (text: String, segments: [TranscriptionSegment]) {
-        await tail?.value
         let text = transcripts.sorted { $0.key < $1.key }.map(\.value)
             .joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         let segments = segmentStore.sorted { $0.key < $1.key }.flatMap(\.value)

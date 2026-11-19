@@ -15,6 +15,10 @@ final class AskViewModel: ObservableObject {
     @Published var isAsking = false
     @Published var errorMessage: String?
     @Published var input = ""
+    /// Which part of the meeting the answers draw on (live partial, long
+    /// meeting). Set from the manager after each Ask call; nil when the whole
+    /// transcript fits.
+    @Published var coverageNote: String?
 
     weak var manager: MeetingManager?
 
@@ -30,6 +34,7 @@ final class AskViewModel: ObservableObject {
         errorMessage = nil
         do {
             suggestions = try await manager.suggestedQuestions()
+            coverageNote = manager.askCoverageNote
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -47,6 +52,7 @@ final class AskViewModel: ObservableObject {
         input = ""
         do {
             answer = try await manager.ask(question: trimmed)
+            coverageNote = manager.askCoverageNote
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -140,6 +146,12 @@ struct AskPane: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Color.white.opacity(0.45))
                 .padding(.leading, 8)
+            if let note = viewModel.coverageNote {
+                Text(note)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.white.opacity(0.45))
+                    .padding(.leading, 8)
+            }
         }
         .padding(.horizontal, 8)
     }

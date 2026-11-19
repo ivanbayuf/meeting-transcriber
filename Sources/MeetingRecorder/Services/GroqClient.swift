@@ -259,18 +259,26 @@ final class GroqClient: @unchecked Sendable {
 
     /// Same retry/fallback behaviour as the summary path, with a caller-chosen
     /// system prompt. Internal so the Ask feature can use it.
-    func chat(_ prompt: String, systemPrompt: String) async throws -> String {
+    /// `failFastOnRateLimit`: for user-initiated Ask — on a 429, try the
+    /// fallback model once instead of sleeping out Groq's retry-after (up to
+    /// ~65s per attempt, shared with the live summaries' budget). A busy
+    /// moment then fails fast with a clear "try again" instead of stalling.
+    func chat(_ prompt: String, systemPrompt: String, failFastOnRateLimit: Bool = false) async throws -> String {
         do {
-            return try await chat(prompt, systemPrompt: systemPrompt, model: summaryModel)
+            return try await chat(prompt, systemPrompt: systemPrompt, model: summaryModel,
+                                  failFastOnRateLimit: failFastOnRateLimit)
         } catch GroqError.rateLimited {
             logger.warning("Still rate limited, trying fallback: \(self.fallbackSummaryModel, privacy: .public)")
-            return try await chat(prompt, systemPrompt: systemPrompt, model: fallbackSummaryModel)
+            return try await chat(prompt, systemPrompt: systemPrompt, model: fallbackSummaryModel,
+                                  failFastOnRateLimit: failFastOnRateLimit)
         } catch GroqError.apiError(let code, _) where code >= 500 {
-            return try await chat(prompt, systemPrompt: systemPrompt, model: fallbackSummaryModel)
+            return try await chat(prompt, systemPrompt: systemPrompt, model: fallbackSummaryModel,
+                                  failFastOnRateLimit: failFastOnRateLimit)
         }
     }
 
-    private func chat(_ prompt: String, systemPrompt: String, model: String) async throws -> String {
+    private func chat(_ prompt: String, systemPrompt: String, model: String,
+                      failFastOnRateLimit: Bool = false) async throws -> String {
         let requestBody = GroqChatRequest(
             model: model,
             messages: [
@@ -294,6 +302,7 @@ final class GroqClient: @unchecked Sendable {
             logger.info("Chat (\(model, privacy: .public)) HTTP \(httpResponse.statusCode, privacy: .public)")
 
             if httpResponse.statusCode == 429 {
+                if failFastOnRateLimit { break }
                 let wait = min(65, max(2, Double(httpResponse.value(forHTTPHeaderField: "retry-after") ?? "") ?? 20))
                 logger.info("Rate limited (attempt \(attempt, privacy: .public)); waiting \(wait, privacy: .public)s")
                 if attempt == 4 { break }

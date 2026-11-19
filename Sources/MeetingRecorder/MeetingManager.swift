@@ -361,13 +361,20 @@ final class MeetingManager: ObservableObject {
         currentMeeting = meeting
         meetingHistory.insert(meeting, at: 0)
         saveHistory()
+        hasLiveTranscript = false
 
         let audioURL = tempDirectory.appendingPathComponent("\(meeting.id.uuidString).wav")
 
-        // Transcribe + summarise each 10-min chunk in the background while recording.
+        // Transcribe + summarise each chunk in the background while recording.
+        // The pipeline's time offsets use the recorder's real chunk length
+        // (10 min, or the debug override) — not a hardcoded 600s.
         let pipeline = LivePipeline(groq: groqClient,
                                     language: selectedLanguageRaw == "auto" ? nil : selectedLanguageRaw,
-                                    meetingDate: meeting.startDate)
+                                    meetingDate: meeting.startDate,
+                                    segmentDuration: TimeInterval(AudioRecorder.segmentSeconds),
+                                    onChunkTranscribed: { [weak self] in
+                                        Task { @MainActor in self?.hasLiveTranscript = true }
+                                    })
         livePipeline = pipeline
         audioRecorder.onSegment = { url, index, isLast in pipeline.add(url, index: index, isLast: isLast) }
 
@@ -440,6 +447,9 @@ final class MeetingManager: ObservableObject {
         defer {
             isProcessing = false
             processingStage = ""
+            // The live pipeline is gone after this run: Ask can only use the
+            // finished transcript from here on.
+            hasLiveTranscript = !(meeting.transcript ?? "").isEmpty
         }
 
         do {
@@ -510,47 +520,114 @@ final class MeetingManager: ObservableObject {
 
     // MARK: - Ask about this meeting
 
+    /// True once the first live chunk has been transcribed. Published so the
+    /// island reveals the Ask button (and widens the pill) the moment there
+    /// is something to ask about — not from the first second of recording.
+    @Published private(set) var hasLiveTranscript = false
+    /// Coverage note for the last Ask context, shown under the Ask header:
+    /// which part of the meeting the answers draw on. Nil when the whole
+    /// transcript fits.
+    @Published private(set) var askCoverageNote: String?
+
     /// Transcript + timestamped segments for Ask. While recording, the live
     /// pipeline's partial transcript (finished chunks so far); otherwise the
     /// finished meeting's stored transcript. Nil when there is nothing to ask
     /// about yet. Only the current meeting is askable in v1 — history meetings
     /// keep their transcripts, but Ask doesn't open them yet.
-    func askContext() async -> (transcript: String, segments: [TranscriptionSegment], date: Date)? {
+    func askContext() async -> (transcript: String, segments: [TranscriptionSegment], date: Date,
+                                summary: String?, coverage: String?)? {
         if isRecording, let pipeline = livePipeline {
             let live = await pipeline.partialTranscript()
             if !live.text.isEmpty {
-                return (live.text, live.segments, currentMeeting?.startDate ?? Date())
+                let truncated = Self.isOverAskCap(transcript: live.text, segments: live.segments)
+                return (live.text, live.segments, currentMeeting?.startDate ?? Date(), nil,
+                        Self.coverageNote(recording: true, truncated: truncated))
             }
         }
         if let meeting = pendingReview ?? currentMeeting,
            let text = meeting.transcript, !text.isEmpty {
-            return (text, meeting.segments ?? [], meeting.startDate)
+            let segments = meeting.segments ?? []
+            return (text, segments, meeting.startDate, Self.summaryText(meeting.summary),
+                    Self.coverageNote(recording: false,
+                                      truncated: Self.isOverAskCap(transcript: text, segments: segments)))
         }
         return nil
     }
 
-    /// True when Ask has anything to work with (live partial or finished text).
+    /// True when Ask has anything to work with: a finished meeting's text, or
+    /// the live partial once the first chunk has been transcribed. False in
+    /// the first minutes of a recording (no finished chunk yet) — the button
+    /// stays hidden until then instead of failing every question.
     var canAsk: Bool {
-        if isRecording { return true }
         if let meeting = pendingReview ?? currentMeeting,
            let text = meeting.transcript, !text.isEmpty { return true }
-        return false
+        return hasLiveTranscript
     }
 
     /// Answers one question from the transcript. Throws `AskError.noTranscript`
     /// when there is nothing to ask about yet.
     func ask(question: String) async throws -> AskAnswer {
         guard let context = await askContext() else { throw AskError.noTranscript }
+        askCoverageNote = context.coverage
         return try await groqClient.ask(question: question, transcript: context.transcript,
-                                        segments: context.segments, meetingDate: context.date)
+                                        segments: context.segments, meetingDate: context.date,
+                                        summary: context.summary)
     }
 
     /// Three suggested questions drawn from what was actually discussed.
     func suggestedQuestions() async throws -> [String] {
         guard let context = await askContext() else { throw AskError.noTranscript }
+        askCoverageNote = context.coverage
         return try await groqClient.suggestedQuestions(transcript: context.transcript,
                                                        segments: context.segments,
-                                                       meetingDate: context.date)
+                                                       meetingDate: context.date,
+                                                       summary: context.summary)
+    }
+
+    /// True when the verbatim transcript won't fit one Ask call, so Ask sends
+    /// a summary + the most relevant part instead of the whole thing.
+    private static func isOverAskCap(transcript: String, segments: [TranscriptionSegment]) -> Bool {
+        if segments.isEmpty { return transcript.count > GroqClient.maxAskChars }
+        let length = segments.reduce(0) { $0 + $1.text.count + 8 } // "[MM:SS] " + newline
+        return length > GroqClient.maxAskChars
+    }
+
+    /// What the Ask pane tells the user about coverage. Live answers never
+    /// cover the chunk recording now; long meetings use a summary + the most
+    /// relevant part instead of the whole transcript.
+    private static func coverageNote(recording: Bool, truncated: Bool) -> String? {
+        if recording, truncated {
+            return "Long meeting — answers use the parts most relevant to your question, from what's been transcribed so far."
+        }
+        if recording {
+            return "Answers cover what's been transcribed so far — the chunk recording now isn't in yet."
+        }
+        if truncated {
+            return "Long meeting — answers use the whole-meeting summary plus the parts most relevant to your question."
+        }
+        return nil
+    }
+
+    /// Compact whole-meeting text for Ask's long-meeting path: title, one-line
+    /// summary, key points, decisions and action items.
+    private static func summaryText(_ summary: MeetingSummary?) -> String? {
+        guard let summary else { return nil }
+        var lines: [String] = []
+        if let title = summary.title, !title.isEmpty { lines.append("Title: \(title)") }
+        if !summary.summary.isEmpty { lines.append(summary.summary) }
+        if let points = summary.keyPoints, !points.isEmpty {
+            lines.append("Key points:\n" + points.map { "- \($0)" }.joined(separator: "\n"))
+        }
+        if !summary.keyDecisions.isEmpty {
+            lines.append("Decisions:\n" + summary.keyDecisions.map { "- \($0.decision)" }.joined(separator: "\n"))
+        }
+        if !summary.actionPoints.isEmpty {
+            lines.append("Action items:\n" + summary.actionPoints.map { point in
+                "- \(point.task)" + (point.isAssigned ? " (\(point.owner))" : "")
+                    + (point.dueDateString.map { " by \($0)" } ?? "")
+            }.joined(separator: "\n"))
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     // MARK: - Review (Upload / Discard)
@@ -590,6 +667,7 @@ final class MeetingManager: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         pendingReview = nil
+        hasLiveTranscript = false
         meetingHistory.removeAll { $0.id == meeting.id }
         if currentMeeting?.id == meeting.id { currentMeeting = nil }
         saveHistory()
@@ -714,6 +792,7 @@ final class MeetingManager: ObservableObject {
     /// The failed meeting stays in History (audio kept) for later.
     func dismissFailure() {
         errorMessage = nil
+        hasLiveTranscript = false
         if currentMeeting?.status == .failed { currentMeeting = nil }
     }
 
