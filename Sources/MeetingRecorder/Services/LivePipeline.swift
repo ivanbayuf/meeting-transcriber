@@ -2,14 +2,15 @@ import Foundation
 import os.log
 
 /// Transcribes each recorded chunk WHILE the meeting is still recording, and
-/// summarises every ~10 minutes of transcribed text in the background. When
+/// summarises in the background each time ~10 minutes' worth of talk builds up. When
 /// recording stops only the last bit is left, so long meetings finish about as
 /// fast as short ones — and spreading the work out keeps a free Groq key under
 /// its per-minute limits.
 ///
 /// Chunks are cut every 10 min, or early when the user asks a question (Ask
 /// wants the latest audio). Each chunk is transcribed once; summaries batch
-/// the text by meeting time, not by chunk, so asking doesn't add summary calls.
+/// by amount of text, not by chunk or clock time, so asking adds no summary
+/// calls and silence costs nothing.
 ///
 /// If any chunk fails, `finish()` returns nil and the caller falls back to
 /// processing the whole recording as before; nothing is lost.
@@ -30,23 +31,22 @@ actor LivePipeline {
     private var partials: [(index: Int, json: String)] = []
     private var failed = false
     private var sawLast = false
-    /// Transcribed text not summarised yet: its first chunk and start time.
+    /// Transcribed text not summarised yet, and the chunk it starts in.
     private var pendingText = ""
     private var pendingFirstIndex: Int?
-    private var pendingStart: TimeInterval = 0
-    /// Meeting seconds of text per summary call.
-    private let summaryEvery: TimeInterval
+    /// Characters of talk per summary call (~10 min of speech).
+    private let summaryChars: Int
     /// Called (once per chunk, on the actor) when a chunk's transcript lands —
     /// the island uses it to reveal the Ask button as soon as there is
     /// something to ask about.
     private let onChunkTranscribed: (@Sendable () -> Void)?
 
-    init(groq: GroqClient, language: String?, meetingDate: Date, summaryEvery: TimeInterval = 600,
+    init(groq: GroqClient, language: String?, meetingDate: Date, summaryChars: Int = 6_000,
          onChunkTranscribed: (@Sendable () -> Void)? = nil) {
         self.groq = groq
         self.language = language
         self.meetingDate = meetingDate
-        self.summaryEvery = summaryEvery
+        self.summaryChars = summaryChars
         self.onChunkTranscribed = onChunkTranscribed
     }
 
@@ -84,21 +84,21 @@ actor LivePipeline {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         onChunkTranscribed?()
-        if pendingFirstIndex == nil { pendingFirstIndex = index; pendingStart = start }
+        if pendingFirstIndex == nil { pendingFirstIndex = index }
         pendingText += (pendingText.isEmpty ? "" : " ") + trimmed
         logger.info("Chunk \(index, privacy: .public) transcribed: \(text.count, privacy: .public) chars")
     }
 
-    /// Hands the pending text to the summary queue once it covers
-    /// `summaryEvery` of meeting time (or at the end of the meeting).
+    /// Hands the pending text to the summary queue once `summaryChars` of
+    /// talk has built up, or whatever is left at the end of the meeting.
+    /// Silence adds nothing, so it never triggers a summary.
     private func summarizeIfDue(force: Bool) {
-        guard !failed, let first = pendingFirstIndex else { return }
-        let end = segmentStore[transcripts.keys.max() ?? first]?.last?.end ?? pendingStart
-        guard force || end - pendingStart >= summaryEvery else { return }
+        guard !failed, let first = pendingFirstIndex,
+              force || pendingText.count >= summaryChars else { return }
         let text = pendingText
         pendingText = ""
         pendingFirstIndex = nil
-        // Skip near-silent stretches (Whisper turns silence into "Thank you.").
+        // Skip a near-silent ending (Whisper turns silence into "Thank you.").
         guard text.count >= 40 else { return }
         let previous = summaryTail
         summaryTail = Task {

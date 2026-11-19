@@ -365,13 +365,12 @@ final class MeetingManager: ObservableObject {
 
         let audioURL = tempDirectory.appendingPathComponent("\(meeting.id.uuidString).wav")
 
-        // Transcribe + summarise each chunk in the background while recording.
-        // The pipeline's time offsets use the recorder's real chunk length
-        // (10 min, or the debug override) — not a hardcoded 600s.
+        // Transcribe each chunk in the background while recording, and
+        // summarise every ~6,000 characters of talk. Time offsets come from
+        // the recorder (chunks vary in length: Ask cuts them early).
         let pipeline = LivePipeline(groq: groqClient,
                                     language: selectedLanguageRaw == "auto" ? nil : selectedLanguageRaw,
                                     meetingDate: meeting.startDate,
-                                    summaryEvery: TimeInterval(AudioRecorder.segmentSeconds),
                                     onChunkTranscribed: { [weak self] in
                                         Task { @MainActor in self?.hasLiveTranscript = true }
                                     })
