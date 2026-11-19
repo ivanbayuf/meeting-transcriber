@@ -237,7 +237,7 @@ final class IslandModel: ObservableObject {
     @Published var page: Page = .main
     /// Non-nil while the "Saved" result card is showing.
     @Published private(set) var flash: OutputReport?
-    /// The Ask pane is open (icon-only sparkles button, beside the chevron).
+    /// The Ask pane is open (via the Ask tab).
     /// While set, the card never auto-collapses — the user is reading answers.
     @Published var askOpen = false
 
@@ -498,7 +498,11 @@ struct NotchIslandView: View {
                         }
                         page(content)
                             .id(content)
-                            .transition(contentTransition)
+                            // Tab switches are instant: the fade below is
+                            // for pipeline changes (processing → review →
+                            // success/failure), not for Notes ↔ Ask. A fade
+                            // on every tab switch reads as lag.
+                            .transition(isTabbedPane(content) ? .identity : contentTransition)
                     }
                 }
             }
@@ -535,9 +539,11 @@ struct NotchIslandView: View {
     }
 
     private var contentTransition: AnyTransition {
-        // Whole-page fade only — the one-by-one reveal of the inner elements
-        // is handled per-row by StaggerReveal below. No delay here: a delayed
-        // whole page would double up with the row stagger.
+        // Whole-page fade — only for pipeline changes (processing, review,
+        // success, failure). Tab switches use .identity (see the page call):
+        // the one-by-one reveal of the inner elements is handled per-row by
+        // StaggerReveal below. No delay here: a delayed whole page would
+        // double up with the row stagger.
         .asymmetric(
             insertion: .opacity.animation(IslandMotion.contentIn),
             removal: .opacity.animation(IslandMotion.contentOut)
@@ -739,7 +745,10 @@ struct NotchIslandView: View {
     /// Ask when leaving it.
     private func tabStrip(content: Pane) -> some View {
         IslandSegmentedControl(
-            titles: ["Notes", "Ask"],
+            segments: [
+                .init(title: "Notes", icon: "doc.text"),
+                .init(title: "Ask", icon: "sparkle", iconIsAccent: true),
+            ],
             selected: content == .ask ? 1 : 0
         ) { index in
             showTab(index == 0 ? .outputs : .ask)
@@ -792,7 +801,8 @@ struct NotchIslandView: View {
         }
     }
 
-    /// Small nudge row: blue star + "Have anything to clarify? I can help".
+    /// Small nudge row: "Have anything to clarify? I can help" (text only —
+    /// the blue star lives exactly once, on the Ask tab).
     /// Slides in from the left; tapping it opens Ask and dismisses the nudge.
     private var nudgeRow: some View {
         Button {
@@ -801,9 +811,6 @@ struct NotchIslandView: View {
             model.openAsk()
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "sparkle")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color.blue.opacity(0.9))
                 Text("Have anything to clarify? I can help")
                     .font(.system(size: 12))
                     .foregroundStyle(Color.white.opacity(0.85))
@@ -1267,36 +1274,52 @@ struct GroqOnboardingCard: View {
 
 /// Segmented control in the island's language: a grey capsule track with
 /// the selected segment a lighter pill that slides across (cf. the iOS
-/// Places-style picker). Used for the main tabs (Notes / Ask) and the Ask
-/// sub-tabs (What should I ask? / Ask another question).
+/// Places-style picker). Used for the main tabs (Notes / Ask). A segment
+/// can carry an icon; an accent icon (the Ask star) stays blue — it is the
+/// one place the blue AI mark appears.
 struct IslandSegmentedControl: View {
-    var titles: [String]
+    struct Segment {
+        var title: String
+        var icon: String?
+        var iconIsAccent: Bool = false
+    }
+
+    var segments: [Segment]
     var selected: Int
     var onSelect: (Int) -> Void
     @Namespace private var namespace
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(titles.indices, id: \.self) { index in
+            ForEach(segments.indices, id: \.self) { index in
                 Button {
                     onSelect(index)
                 } label: {
-                    Text(titles[index])
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(selected == index ? 0.95 : 0.55))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 26)
-                        .background {
-                            if selected == index {
-                                Capsule()
-                                    .fill(Color.white.opacity(0.12))
-                                    .matchedGeometryEffect(id: "segment", in: namespace)
-                            }
+                    HStack(spacing: 5) {
+                        if let icon = segments[index].icon {
+                            Image(systemName: icon)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(segments[index].iconIsAccent
+                                    ? Color.blue.opacity(0.9)
+                                    : Color.white.opacity(selected == index ? 0.95 : 0.55))
                         }
-                        .contentShape(Capsule())
+                        Text(segments[index].title)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(selected == index ? 0.95 : 0.55))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 26)
+                    .background {
+                        if selected == index {
+                            Capsule()
+                                .fill(Color.white.opacity(0.12))
+                                .matchedGeometryEffect(id: "segment", in: namespace)
+                        }
+                    }
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(titles[index])
+                .accessibilityLabel(segments[index].title)
             }
         }
         .padding(3)

@@ -7,16 +7,10 @@ import SwiftUI
 /// answers from the transcript once there is one — and from the app itself
 /// before that (see AskAssistant.swift). Transcript answers carry the
 /// verbatim quotes they rest on, each with its time in the meeting.
-/// The Ask pane's two tabs: the suggested questions, or the free-form form.
-enum AskTab { case suggestions, ask }
-
 @MainActor
 final class AskViewModel: ObservableObject {
     @Published var suggestions: [String] = []
     @Published var isLoadingSuggestions = false
-    /// Which half of the pane is showing: the suggestion list, or the
-    /// free-form form with its answer.
-    @Published var askTab: AskTab = .suggestions
     @Published var currentQuestion: String?
     @Published var answer: AskAnswer?
     @Published var isAsking = false
@@ -57,8 +51,6 @@ final class AskViewModel: ObservableObject {
         currentQuestion = trimmed
         answer = nil
         input = ""
-        // Asking jumps to the form tab, where the answer shows.
-        askTab = .ask
         do {
             answer = try await manager.ask(question: trimmed)
             coverageNote = manager.askCoverageNote
@@ -83,36 +75,17 @@ struct AskPane: View {
             header
                 .modifier(NotchIslandView.StaggerReveal(index: 0, active: reveal))
 
-            // The pane's two tabs: the suggested questions, or the form.
-            IslandSegmentedControl(
-                titles: ["What should I ask?", "Ask another question"],
-                selected: viewModel.askTab == .suggestions ? 0 : 1
-            ) { index in
-                viewModel.askTab = index == 0 ? .suggestions : .ask
-                if index == 0 && viewModel.suggestions.isEmpty {
-                    Task { await viewModel.loadSuggestions() }
-                }
-            }
-            .modifier(NotchIslandView.StaggerReveal(index: 1, active: reveal))
-            .padding(.top, 6)
-            .padding(.horizontal, 8)
+            // "What should I ask?" is a dropdown: the trigger row, and the
+            // suggestions pop out as a native menu (no chips, no list
+            // taking up pane space). Picking one asks it straight away.
+            suggestionsDropdown
+                .modifier(NotchIslandView.StaggerReveal(index: 1, active: reveal))
+                .padding(.top, 6)
+                .padding(.horizontal, 8)
 
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 10) {
-                    if viewModel.askTab == .suggestions {
-                        if viewModel.isLoadingSuggestions && viewModel.suggestions.isEmpty {
-                            HStack(spacing: 8) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("Thinking of questions…")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Color.white.opacity(0.6))
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        } else {
-                            suggestionRows
-                        }
-                    } else if viewModel.isAsking {
+                    if viewModel.isAsking {
                         askingRow
                     } else if let answer = viewModel.answer {
                         answerView(answer)
@@ -134,12 +107,10 @@ struct AskPane: View {
             }
             .modifier(NotchIslandView.StaggerReveal(index: 2, active: reveal))
 
-            // The form lives on its own tab; the suggestions tab gets the room.
-            if viewModel.askTab == .ask {
-                inputRow
-                    .modifier(NotchIslandView.StaggerReveal(index: 3, active: reveal))
-                    .padding(.top, 8)
-            }
+            // The form is always on, under the dropdown.
+            inputRow
+                .modifier(NotchIslandView.StaggerReveal(index: 3, active: reveal))
+                .padding(.top, 8)
 
             Spacer(minLength: 6)
             bottomBar
@@ -151,15 +122,10 @@ struct AskPane: View {
         .frame(width: width, height: IslandMetrics.maxBodyHeight, alignment: .top)
         .onAppear {
             viewModel.bind(manager)
-            if viewModel.askTab == .suggestions && viewModel.suggestions.isEmpty {
+            if viewModel.suggestions.isEmpty {
                 Task { await viewModel.loadSuggestions() }
             }
-            if viewModel.askTab == .ask {
-                focusInput()
-            }
-        }
-        .onChange(of: viewModel.askTab) { _, tab in
-            if tab == .ask { focusInput() }
+            focusInput()
         }
     }
 
@@ -177,17 +143,9 @@ struct AskPane: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 2) {
-            // No back button here: the main chevron (top right) is the way
-            // back — Ask → the page it came from, then collapse.
-            HStack(spacing: 6) {
-                Image(systemName: "sparkle")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Color.blue.opacity(0.9))
-                Text("Ask about this meeting")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.white)
-            }
-            .frame(height: 24)
+            // No title here: the Ask tab in the navigation already says
+            // what this pane is. Just the basis line (and the coverage
+            // note, once a question has been asked).
             Text("Answers come from the transcript, or the app.")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.white.opacity(0.45))
@@ -200,34 +158,46 @@ struct AskPane: View {
         .padding(.horizontal, 8)
     }
 
-    // MARK: Suggestions list (the "What should I ask?" tab)
+    // MARK: Suggestions dropdown
 
-    private var suggestionRows: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(viewModel.suggestions, id: \.self) { suggestion in
-                Button {
-                    Task { await viewModel.ask(suggestion) }
-                } label: {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "sparkle")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Color.blue.opacity(0.7))
-                            .padding(.top, 2)
-                        Text(suggestion)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.white.opacity(0.75))
-                            .multilineTextAlignment(.leading)
-                        Spacer(minLength: 0)
+    /// The "What should I ask?" trigger: a row with a chevron; the
+    /// suggestions pop out as a native menu. Text only, no star — the blue
+    /// star lives exactly once, on the Ask tab in the main navigation.
+    private var suggestionsDropdown: some View {
+        Menu {
+            if viewModel.suggestions.isEmpty {
+                Button("No suggestions right now") {}
+                    .disabled(true)
+            } else {
+                ForEach(viewModel.suggestions, id: \.self) { suggestion in
+                    Button(suggestion) {
+                        Task { await viewModel.ask(suggestion) }
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(Color.white.opacity(0.05))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .contentShape(RoundedRectangle(cornerRadius: 8))
                 }
-                .buttonStyle(PressScaleStyle())
             }
+        } label: {
+            HStack(spacing: 6) {
+                Text("What should I ask?")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.white)
+                Spacer(minLength: 0)
+                if viewModel.isLoadingSuggestions {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.45))
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(Color.white.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
+        .menuStyle(.borderlessButton)
+        .disabled(viewModel.isLoadingSuggestions)
     }
 
     // MARK: Asking / answer
@@ -285,9 +255,7 @@ struct AskPane: View {
 
     private var inputRow: some View {
         HStack(spacing: 8) {
-            TextField(viewModel.hasAnswer ? "Ask another question…"
-                        : (manager.canAsk ? "Ask a question…" : "Ask about the meeting or the app…"),
-                      text: $viewModel.input)
+            TextField("Ask about the meeting…", text: $viewModel.input)
                 .font(.system(size: 13))
                 .foregroundStyle(Color.white)
                 .textFieldStyle(.plain)
