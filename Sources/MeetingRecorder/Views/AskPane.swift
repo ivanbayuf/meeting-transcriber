@@ -40,6 +40,14 @@ final class AskViewModel: ObservableObject {
         isLoadingSuggestions = false
     }
 
+    /// A meeting just ended: the conversation belonged to it, so the next
+    /// meeting starts with a fresh chat. Called when recording stops.
+    func clearTurns() {
+        turns = []
+        errorMessage = nil
+        coverageNote = nil
+    }
+
     /// Asks one question and appends it to the conversation; earlier
     /// questions and answers stay above it.
     func ask(_ question: String) async {

@@ -34,10 +34,12 @@ struct IslandMetrics: Equatable {
     /// chevron right) → 80pt total without a notch. On a notched screen the
     /// wings sit either side of the camera housing (nothing can draw under it).
     static let idleWing: CGFloat = 40
-    /// While recording the wings widen just enough for the live timer.
-    /// Fits the timer box: inset 4 + 7 + dot 6 + 5 + "00:00" ≈36 + 7 ≈ 65.
-    /// Left wing also carries "Stop" beside the waveform: 4 + 35 + "Stop" ≈25 + 7 ≈ 71.
-    static let recordingWing: CGFloat = 72
+    /// While recording the wings widen. Left wing carries "Stop" beside the
+    /// waveform (4 + 35 + "Stop" ≈25 + 7 ≈ 71); right wing the live timer
+    /// beside the chevron ("00:00" ≈36 + 7 each side + chevron 24 ≈ 74).
+    /// 80 leaves room, and covers the hour timer ("1:00:00" ≈ 82, 2pt into
+    /// the notch margin, hidden behind the housing).
+    static let recordingWing: CGFloat = 80
     static let collapsedBottomRadius: CGFloat = 12
     /// Expanded: square top corners (flush with the screen edge, like the
     /// notch), rounded bottom.
@@ -186,8 +188,6 @@ enum IslandMotion {
     static let reducedFade = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.15)
     /// The only continuous animation in the app — record button pulse.
     static let pulse = Animation.easeInOut(duration: 0.8).repeatForever(autoreverses: true)
-    /// Blinking dot: ~1s steady cadence with autoreversal (item 24).
-    static let blink = Animation.easeInOut(duration: 0.5).repeatForever(autoreverses: true)
 }
 
 /// Height driven by the morph spring. The overshoot on collapse would
@@ -462,6 +462,9 @@ struct NotchIslandView: View {
                 } else {
                     nudgeTask?.cancel()
                     showNudge = false
+                    // The meeting ended: its chat goes with it, so the next
+                    // meeting starts with a fresh conversation.
+                    askViewModel.clearTurns()
                 }
             }
             // Ask needs typing: the panel can become key (see canBecomeKey —
@@ -652,23 +655,23 @@ struct NotchIslandView: View {
                                             cornerRadius: metrics.controlCornerRadius,
                                             scales: false))
             Spacer(minLength: 0)
-            ZStack(alignment: .trailing) {
+            // The chevron stays while recording: collapsed + recording shows
+            // the timer with the chevron right beside it (no red dot). The
+            // chevron is permanent; only the timer fades in and out.
+            HStack(spacing: 0) {
                 if recording && !open {
-                    // Collapsed + recording: blinking dot + timer (items 22, 24)
                     collapsedClock
                         .modifier(ElementHoverScale(isHovering: $clockHovering,
                                                     cornerRadius: metrics.controlCornerRadius,
                                                     scales: false))
                         .transition(.opacity)
-                } else {
-                    chevron(open: open, content: content)
-                        .modifier(ElementHoverScale(
-                            isHovering: $chevronHovering,
-                            enabled: !(content == .processing || content == .review || content == .failure),
-                            cornerRadius: metrics.controlCornerRadius
-                        ))
-                        .transition(.opacity)
                 }
+                chevron(open: open, content: content)
+                    .modifier(ElementHoverScale(
+                        isHovering: $chevronHovering,
+                        enabled: !(content == .processing || content == .review || content == .failure),
+                        cornerRadius: metrics.controlCornerRadius
+                    ))
             }
         }
         // Same inset open or collapsed: glyphs land ~11pt in, on the body's 12pt text edge.
@@ -699,24 +702,22 @@ struct NotchIslandView: View {
         return false
     }
 
-    /// Live timer + blinking dot in the collapsed right wing (items 22, 24).
-    /// Clicking the timer opens the card.
+    /// Live timer in the collapsed right wing (items 22, 24). Clicking the
+    /// timer opens the card. No red dot — the timer alone, with the chevron
+    /// beside it (see topRow).
     @ViewBuilder
     private var collapsedClock: some View {
         if let start = manager.recordingStartedAt {
-            // Dot + time are ONE box (one button, one highlight), same 7pt inset as the glyphs.
+            // Time is ONE box (one button, one highlight), same 7pt inset as the glyphs.
             Button { model.toggleExpanded() } label: {
-                HStack(spacing: 5) {
-                    BlinkingDot()
-                    RecordingClock(start: start)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.9))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
-                .padding(.horizontal, IslandMetrics.controlContentInset)
-                .frame(height: IslandMetrics.controlSize)
-                .contentShape(Rectangle())
+                RecordingClock(start: start)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.9))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .padding(.horizontal, IslandMetrics.controlContentInset)
+                    .frame(height: IslandMetrics.controlSize)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Expand")
@@ -1462,27 +1463,6 @@ struct PulseEffect: ViewModifier {
 }
 
 // MARK: - Blinking dot (item 24)
-
-/// Small red dot shown next to the timer while recording. Blinks at a steady
-/// ~1s cadence (opacity 0.2 ↔ 1.0, 0.5s each half = 1s full cycle).
-/// Reduce Motion: static dot, no animation.
-struct BlinkingDot: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var blinkPhase = false
-
-    var body: some View {
-        Circle()
-            .fill(Color.red)
-            .frame(width: 6, height: 6)
-            .opacity(reduceMotion ? 1.0 : (blinkPhase ? 1.0 : 0.2))
-            .animation(reduceMotion ? nil : IslandMotion.blink, value: blinkPhase)
-            .onAppear {
-                guard !reduceMotion else { return }
-                blinkPhase = true
-            }
-            .accessibilityHidden(true)
-    }
-}
 
 /// mm:ss (h:mm:ss past an hour), ticking once a second. Digits are monospaced
 /// and the change is not animated — it's live data, not decoration.
